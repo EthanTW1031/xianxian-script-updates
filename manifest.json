@@ -1,0 +1,60 @@
+{
+  "schemaVersion": 1,
+  "publishedAt": "2026-09-25T06:48:20.407Z",
+  "scripts": [
+    {
+      "id": "fb-inbox-finder",
+      "name": "FB 收件匣姓名搜尋助手（含前天）",
+      "namespace": "local.fb-inbox-finder",
+      "version": "1.0.0",
+      "file": "scripts/fb-inbox-finder.user.js",
+      "sha256": "4cd58d081e0249ea381007fb41ad4775b8a1e38c397d68e60500a4ae27be490f",
+      "bytes": 14656
+    },
+    {
+      "id": "jambo-new-buyer",
+      "name": "Jambo 新買家檢查",
+      "namespace": "https://jambolive.tv/",
+      "version": "4.0.3",
+      "file": "scripts/jambo-new-buyer.user.js",
+      "sha256": "35fbf01066af4645a13f9712540636cc40e4190efc826c81b59ee807b81ffb30",
+      "bytes": 35015
+    },
+    {
+      "id": "jambo-product-image-batch-upload",
+      "name": "Jambo 商品圖片批次上傳",
+      "namespace": "https://jambolive.tv/",
+      "version": "1.0.4",
+      "file": "scripts/jambo-product-image-batch-upload.user.js",
+      "sha256": "424ce47b4ca62e6f79940435f1460d7d6fafe689c286e7b264f3f45fc3db969b",
+      "bytes": 45101
+    },
+    {
+      "id": "jambo-stock",
+      "name": "Jambo 商品庫存",
+      "namespace": "https://jambolive.tv/",
+      "version": "2.0.0",
+      "file": "scripts/jambo-stock.user.js",
+      "sha256": "2e9c1c9340638a8888e448e03c424e566e107a582cc65c73b47ecade8a27af46",
+      "bytes": 42667
+    },
+    {
+      "id": "shopee-auto-detail-reply",
+      "name": "Shopee 自動回覆明細",
+      "namespace": "local.shopee.auto-reply-detail",
+      "version": "1.4.0",
+      "file": "scripts/shopee-auto-detail-reply.user.js",
+      "sha256": "ffe765dc59a789f2291899c223ca1fecdc466a9325fdfb63b8a4fee404dc1411",
+      "bytes": 111300
+    },
+    {
+      "id": "shopee-live-order-capture",
+      "name": "Shopee Live Order Capture",
+      "namespace": "https://github.com/EthanTW1031/Shopee",
+      "version": "0.4.0",
+      "file": "scripts/shopee-live-order-capture.user.js",
+      "sha256": "d93d90c0552f30b839a21b65d3c21cd9a67ec26de403da85c4a6497ddc1716e5",
+      "bytes": 252887
+    }
+  ]
+}
