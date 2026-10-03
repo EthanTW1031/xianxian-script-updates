@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee 自動回覆明細
 // @namespace    local.shopee.auto-reply-detail
-// @version      1.4.0
+// @version      1.4.2
 // @description  聊聊頁手動匯入已審核 Excel，預覽後安全逐筆發送
 // @match        https://seller.shopee.tw/new-webchat/conversations*
 // @require      https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js
@@ -18,7 +18,8 @@
 
   // 必須與檔案開頭的 @version 完全相同：面板顯示的是這個常數，不是 @version。
   // v1.1.7 曾漏改這裡，導致面板顯示 1.1.5、現場無法判斷實際安裝版本。
-  const VERSION = "1.4.0";
+  const VERSION = "1.4.2";
+  const SHIPPING_NOTICE = "僅限使用蝦皮店到店/711/全家/新竹物流方式結單";
   const STORE = Object.freeze({
     sent: "winlist-shopee:sent:v3",
     sentLegacy: "winlist-shopee:sent:v2",
@@ -134,6 +135,18 @@
 
   function formatMoney(value) {
     return Math.round(Number(value) || 0).toLocaleString("zh-TW");
+  }
+
+  function totalWithShopeeFee(goodsTotal) {
+    if (!Number.isSafeInteger(goodsTotal) || goodsTotal < 0) {
+      throw new Error("商品總金額超出有效整數範圍，無法計算手續費。");
+    }
+    // 以整數運算避免乘 1.1 的浮點誤差；每位買家合計後才捨去小數。
+    const total = BigInt(goodsTotal) * 110n / 100n;
+    if (total > BigInt(Number.MAX_SAFE_INTEGER)) {
+      throw new Error("含手續費總金額超出有效整數範圍。");
+    }
+    return Number(total);
   }
 
   function escapeHtml(value) {
@@ -929,7 +942,13 @@
       for (let column = 1; column <= 20; column += 1) {
         const label = cellText(settingsSheet.getCell(rowNumber, column));
         if (!labels.has(label)) continue;
-        const value = cellValue(settingsSheet.getCell(rowNumber, column + 1));
+        const settingCell = settingsSheet.getCell(rowNumber, column + 1);
+        const rawValue = settingCell.value;
+        const isDateSetting = label === "場次日期" || label === "結單日";
+        const value = isDateSetting && rawValue instanceof Date &&
+          Number.isFinite(rawValue.getTime())
+          ? `${rawValue.getUTCMonth() + 1}/${rawValue.getUTCDate()}`
+          : cellValue(settingCell);
         values[label] =
           label === "開頭範本" || label === "結尾範本"
             ? normalizeMultilineText(value)
@@ -937,21 +956,22 @@
       }
     }
     return {
+      chargeShopeeFee: fallback.chargeShopeeFee === true,
       openingTemplate:
-        values["開頭範本"] || fallback.openingTemplate,
+        Object.hasOwn(values, "開頭範本") ? values["開頭範本"] : fallback.openingTemplate,
       closingTemplate:
-        values["結尾範本"] || fallback.closingTemplate,
+        Object.hasOwn(values, "結尾範本") ? values["結尾範本"] : fallback.closingTemplate,
       eventDate: values["場次日期"] || fallback.eventDate,
-      closingDate: values["結單日"] || fallback.closingDate,
+      closingDate: values["結單日"] || "",
       session: values["直播Session"] || "",
       eventDateSource:
         values["場次日期來源"] ||
         fallback.eventDateSource ||
         "來源不明",
       closingDateSource:
-        values["結單日來源"] ||
-        fallback.closingDateSource ||
-        "來源不明",
+        values["結單日"]
+          ? values["結單日來源"] || fallback.closingDateSource || "來源不明"
+          : "未設定",
     };
   }
 
@@ -1580,6 +1600,9 @@
     session = "",
     multiPriceCodes = new Set(),
   ) {
+    if (!normalizeText(config.closingDate) && String(config.closingTemplate ?? "").includes("{結單日}")) {
+      throw new Error("結單日已留空，但結尾範本仍含 {結單日}；請刪除結尾的日期句，或填入結單日。");
+    }
     const errors = [];
     const warnings = [];
     const finalizedRows = [];
@@ -1702,7 +1725,9 @@
     const items = [...byAccount.entries()]
       .sort(([left], [right]) => naturalCompare(left, right))
       .map(([account, accountRows]) => {
-        const total = accountRows.reduce((sum, row) => sum + row.amount, 0);
+        const goodsTotal = accountRows.reduce((sum, row) => sum + row.amount, 0);
+        const chargeShopeeFee = config.chargeShopeeFee === true;
+        const total = chargeShopeeFee ? totalWithShopeeFee(goodsTotal) : goodsTotal;
         const opening = applyTemplate(config.openingTemplate, {
           account,
           eventDate: config.eventDate,
@@ -1727,8 +1752,11 @@
           opening,
           `${account}：`,
           ...lines,
-          `總金額為：$${formatMoney(total)}`,
+          chargeShopeeFee
+            ? `總金額為：$${formatMoney(goodsTotal)} + 10%手續費 = ${total}`
+            : `總金額為：$${formatMoney(total)}`,
           closing,
+          chargeShopeeFee && !closing.includes(SHIPPING_NOTICE) ? SHIPPING_NOTICE : "",
         ]
           .filter(Boolean)
           .join("\n");
@@ -1738,6 +1766,8 @@
           messageHash,
           account,
           rows: accountRows,
+          goodsTotal,
+          feeAmount: total - goodsTotal,
           total,
           message,
         };
@@ -1746,6 +1776,7 @@
       version: 4,
       createdAt: new Date().toISOString(),
       session,
+      chargeShopeeFee: config.chargeShopeeFee === true,
       eventDate: config.eventDate,
       closingDate: config.closingDate,
       eventDateSource: config.eventDateSource || "來源不明",
@@ -1765,7 +1796,9 @@
     if (!queue) return "";
     return (
       `本次訊息日期：場次 ${queue.eventDate || "未填"}（${panelDateSourceLabel(queue.eventDateSource)}）` +
-      `・結單 ${queue.closingDate || "未填"}（${panelDateSourceLabel(queue.closingDateSource)}）`
+      (queue.closingDate
+        ? `・結單 ${queue.closingDate}（${panelDateSourceLabel(queue.closingDateSource)}）`
+        : "・結單日未設定")
     );
   }
 
@@ -2461,6 +2494,7 @@
       failed: loadFailedHistory(),
       logs: GM_getValue(STORE.logs, []),
       running: false,
+      importing: false,
       stopRequested: false,
       resendExpanded: false,
     };
@@ -2469,6 +2503,7 @@
       <div class="wl-section">
         <h3>1. 手動匯入已審核 Excel</h3>
         <label class="wl-field"><span>選擇人工審核並存檔後的 .xlsx</span><input data-b-xlsx type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"></label>
+        <label class="wl-check"><input data-shopee-fee type="checkbox"><span>加收 10% 手續費（小數捨去），加上指定物流說明</span></label>
         <div class="wl-status wl-hidden" data-import-status></div>
         <p class="wl-mini">只讀工作表1「已確認」；留在工作表2「待確認」的資料不會發送。選檔與預覽不會自動送出訊息。</p>
       </div>
@@ -2538,6 +2573,7 @@
     `;
 
     const xlsxInput = shell.root.querySelector("[data-b-xlsx]");
+    const shopeeFee = shell.root.querySelector("[data-shopee-fee]");
     const importStatus = shell.root.querySelector("[data-import-status]");
     const summary = shell.root.querySelector("[data-summary]");
     const messageDates = shell.root.querySelector("[data-message-dates]");
@@ -2781,6 +2817,9 @@
       summary.textContent = state.queue
         ? `Session：${state.queue.session || "未標示"}\n共 ${queueSummary.total} 位；已發送 ${queueSummary.sent}；內容已變動 ${queueSummary.changed}；可能已發送 ${queueSummary.uncertain}；預設可發送 ${queueSummary.sendByDefault}`
         : "尚未手動匯入已審核 Excel。";
+      if (state.queue?.chargeShopeeFee) summary.textContent += "\n手續費：10%，每位買家合計後捨去小數。";
+      xlsxInput.disabled = state.running || state.importing;
+      shopeeFee.disabled = state.running || state.importing;
       messageDates.classList.toggle("wl-hidden", !state.queue);
       messageDates.textContent = formatQueueDateSummary(state.queue);
       previewSelect.innerHTML = items
@@ -2806,7 +2845,7 @@
       state.failed = loadFailedHistory();
       renderQueue();
     };
-    xlsxInput.addEventListener("change", async () => {
+    const importSelectedWorkbook = async () => {
       if (state.running) {
         showImportStatus("發送進行中，請先按緊急停止再更換 Excel。", "warn");
         return;
@@ -2822,10 +2861,12 @@
       renderQueue();
       const file = xlsxInput.files?.[0];
       if (!file) return;
+      state.importing = true;
+      renderQueue();
       try {
         state.queue = await readReviewedWorkbook(
           await file.arrayBuffer(),
-          loadConfig(),
+          { ...loadConfig(), chargeShopeeFee: shopeeFee.checked },
         );
         refreshSentHistory();
         const warningText = state.queue.warnings?.length
@@ -2839,8 +2880,13 @@
         state.queue = null;
         renderQueue();
         showImportStatus(error.message || String(error), "error");
+      } finally {
+        state.importing = false;
+        renderQueue();
       }
-    });
+    };
+    xlsxInput.addEventListener("change", importSelectedWorkbook);
+    shopeeFee.addEventListener("change", importSelectedWorkbook);
     async function interruptibleDelay(milliseconds, label) {
       const endsAt = Date.now() + milliseconds;
       while (Date.now() < endsAt) {
@@ -3184,6 +3230,7 @@
   }
 
   const testApi = {
+    totalWithShopeeFee,
     normalizeText,
     normalizeCsvCell,
     parseCsv,
