@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee Live Order Capture
 // @namespace    https://github.com/EthanTW1031/Shopee
-// @version      0.4.0
+// @version      0.4.1
 // @description  擷取蝦皮官方 PC 主播後台的直播留言並在本機整理喊單資料
 // @author       EthanTW1031
 // @match        https://live.shopee.tw/pc/live*
@@ -2987,6 +2987,10 @@
     const text = String(value ?? "");
     return NUMERIC_IDENTIFIER_PATTERN.test(text) ? `="${text}"` : protectSpreadsheetValue(text);
   }
+  function protectBuyerAccountValue(value) {
+    const text = protectSpreadsheetValue(value);
+    return text ? `="${text.replace(/"/gu, '""')}"` : "";
+  }
   function escapeCsvCell(value, { buyerControlled = false } = {}) {
     const protectedValue = buyerControlled ? protectSpreadsheetValue(value) : String(value ?? "");
     return `"${protectedValue.replace(/"/gu, '""')}"`;
@@ -3039,6 +3043,9 @@
   }
   function serializeCsvRow(row, { dataRow = true } = {}) {
     return row.map((value, columnIndex) => {
+      if (dataRow && columnIndex === CSV_COLUMN_INDEX.BUYER_USERNAME) {
+        return escapeCsvCell(protectBuyerAccountValue(value));
+      }
       if (dataRow && IDENTIFIER_COLUMNS.has(columnIndex)) {
         return escapeCsvCell(protectIdentifierValue(value));
       }

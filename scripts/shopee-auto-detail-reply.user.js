@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee 自動回覆明細
 // @namespace    local.shopee.auto-reply-detail
-// @version      1.4.2
+// @version      1.4.3
 // @description  聊聊頁手動匯入已審核 Excel，預覽後安全逐筆發送
 // @match        https://seller.shopee.tw/new-webchat/conversations*
 // @require      https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js
@@ -18,7 +18,7 @@
 
   // 必須與檔案開頭的 @version 完全相同：面板顯示的是這個常數，不是 @version。
   // v1.1.7 曾漏改這裡，導致面板顯示 1.1.5、現場無法判斷實際安裝版本。
-  const VERSION = "1.4.2";
+  const VERSION = "1.4.3";
   const SHIPPING_NOTICE = "僅限使用蝦皮店到店/711/全家/新竹物流方式結單";
   const STORE = Object.freeze({
     sent: "winlist-shopee:sent:v3",
@@ -253,13 +253,21 @@
       headers.map((header, index) => [header, index]),
     );
     const records = [];
+    const identityErrors = [];
     const warnings = [];
 
     for (let rowIndex = 1; rowIndex < rows.length; rowIndex += 1) {
       const row = rows[rowIndex];
       const get = (header) =>
         normalizeCsvCell(row[indexes[header]] ?? "");
-      const account = normalizeText(get("買家帳號"));
+      if (get("狀態") === "inactiveCode") continue;
+      const accountResult = validateBuyerAccount(get("買家帳號"));
+      const account = accountResult.text;
+      let buyerUid = "";
+      if (!accountResult.ok) identityErrors.push(accountProblem(`CSV 第 ${rowIndex + 1} 列`, get("買家帳號")));
+      try { buyerUid = readBuyerUid(get("買家UID")); }
+      catch (error) { identityErrors.push(`CSV 第 ${rowIndex + 1} 列：${error.message}`); }
+      if (!accountResult.ok) continue;
       const code = normalizeText(get("商品代號")).toUpperCase();
       const productName = normalizeText(get("品名"));
       const rawQuantity = parseNumber(get("數量"));
@@ -282,6 +290,7 @@
         session: normalizeText(get("直播Session")),
         messageId: normalizeText(get("留言ID")),
         account,
+        buyerUid,
         code,
         productName,
         color: specification.color,
@@ -298,6 +307,7 @@
       });
     }
 
+    if (identityErrors.length) throw buyerAccountError(identityErrors);
     if (!records.length) {
       throw new Error("CSV 中沒有可用的喊單資料。");
     }
@@ -311,7 +321,148 @@
     });
   }
 
+  const ROSTER_TITLE = "買家名冊 v1";
+  const ROSTER_PREFIX = "SHOPEE_BUYER_ROSTER_V1:";
+  const MISSING_ROSTER_WARNING = "這份檔沒有買家名冊，無法核對帳號是否被 Excel 改過";
+  const INVALID_ROSTER_WARNING = "買家名冊無法使用，請核對原始資料與帳號；本次僅做帳號型別與樣式檢查";
+  const MONTH = "(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)";
+  const ACCOUNT_DATE = new RegExp(`^(?:\\d+-${MONTH}(?:-\\d{2})?|${MONTH}-\\d{2}|\\d+月\\d+日|\\d{4}/\\d{1,2}/\\d{1,2})$`, "u");
+  const ACCOUNT_SCIENTIFIC = /^[+-]?\d+(?:\.\d+)?E[+-]\d+$/u;
+  const ACCOUNT_ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/u;
+  const ACCOUNT_ERROR = /^(?:TRUE|FALSE|#NAME\?|#VALUE!|#REF!|#DIV\/0!|#N\/A|#NUM!|#NULL!)$/u;
+
+  function effectiveBuyerText(value) {
+    if (value == null) return { ok: true, text: "" };
+    if (typeof value === "string") return { ok: true, text: value };
+    if (typeof value !== "object" || Object.prototype.toString.call(value) === "[object Date]") return { ok: false, text: "" };
+    if (Object.hasOwn(value, "formula") || Object.hasOwn(value, "sharedFormula")) {
+      return typeof value.result === "string" ? { ok: true, text: value.result } : { ok: false, text: "" };
+    }
+    if (typeof value.text === "string") return { ok: true, text: value.text };
+    if (Array.isArray(value.richText) && value.richText.every(part => typeof part?.text === "string")) {
+      return { ok: true, text: value.richText.map(part => part.text).join("") };
+    }
+    return { ok: false, text: "" };
+  }
+
+  function validateBuyerAccount(value) {
+    const result = effectiveBuyerText(value);
+    const text = result.ok ? normalizeText(normalizeCsvCell(result.text)) : "";
+    const converted = ACCOUNT_DATE.test(text) || ACCOUNT_SCIENTIFIC.test(text) || ACCOUNT_ISO.test(text) || ACCOUNT_ERROR.test(text);
+    return { ok: result.ok && !converted, text, reason: !result.ok ? "non-text" : converted ? "excel-shape" : "" };
+  }
+
+  function accountProblem(label, value) {
+    const display = buyerValueDisplay(value);
+    return `${label}買家帳號「${display}」不是文字或疑似被 Excel 轉型；請從原始資料核對並以文字改回正確帳號，只改顯示格式不能還原。`;
+  }
+
+  function buyerValueDisplay(value) {
+    if (Object.prototype.toString.call(value) === "[object Date]") {
+      return Number.isFinite(value.getTime()) ? `日期 ${value.getUTCFullYear()}/${value.getUTCMonth() + 1}/${value.getUTCDate()}` : "無效日期";
+    }
+    if (typeof value === "number") return `數字 ${value}`;
+    if (typeof value === "boolean") return value ? "TRUE" : "FALSE";
+    if (value && typeof value === "object") {
+      if (Object.hasOwn(value, "formula") || Object.hasOwn(value, "sharedFormula")) {
+        return Object.hasOwn(value, "result") ? buyerValueDisplay(value.result) : "公式（沒有已儲存的文字結果）";
+      }
+      if (value.error) return `錯誤值 ${value.error}`;
+      const text = effectiveBuyerText(value);
+      if (text.ok) return text.text;
+    }
+    return String(value ?? "");
+  }
+
+  function buyerAccountError(errors) {
+    const error = new Error(errors.join("；"));
+    error.code = "BUYER_ACCOUNT_REVIEW_REQUIRED";
+    error.details = { issues: errors };
+    return error;
+  }
+
+  function readBuyerUid(value) {
+    if (value == null || value === "") return "";
+    if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && String(value).length <= 15) return String(value);
+    if (typeof value === "string") {
+      const text = normalizeCsvCell(value); // UID 不做帳號的 NFKC／空白壓縮。
+      if (!text || /^[0-9]+$/u.test(text)) return text;
+    }
+    if (value && typeof value === "object") {
+      const result = effectiveBuyerText(value);
+      if (result.ok) return readBuyerUid(result.text);
+    }
+    throw buyerAccountError(["買家 UID 格式或精度無法確認，請從原始資料核對，不得四捨五入或猜測。"]);
+  }
+
+  function rosterRows(sources) {
+    const byAccount = new Map(), byUid = new Map(), errors = [];
+    for (const [index, row] of sources.entries()) {
+      const account = validateBuyerAccount(row.account);
+      if (typeof row.account !== "string" || !account.ok) { errors.push(accountProblem(`名冊來源第 ${index + 1} 列`, row.account)); continue; }
+      if (!account.text) continue;
+      let uid;
+      try { uid = readBuyerUid(row.buyerUid); } catch (error) { errors.push(`名冊來源第 ${index + 1} 列：${error.message}`); continue; }
+      const previous = byAccount.get(account.text);
+      if (previous && uid && previous !== uid) errors.push(`帳號「${account.text}」對應不同 UID：${previous}／${uid}。`);
+      if (uid && byUid.has(uid) && byUid.get(uid) !== account.text) errors.push(`UID ${uid} 對應不同帳號：${byUid.get(uid)}／${account.text}。`);
+      byAccount.set(account.text, previous || uid);
+      if (uid) byUid.set(uid, account.text);
+    }
+    if (errors.length) throw buyerAccountError(errors);
+    return [...byAccount].map(([account, buyerUid]) => ({ account, buyerUid }))
+      .sort((a, b) => a.account < b.account ? -1 : a.account > b.account ? 1 : 0);
+  }
+
+  function rosterFingerprint(meta, rows) {
+    return hashString(JSON.stringify([meta.schema, meta.session, meta.scope, meta.count, rows.map(row => [row.account, row.buyerUid])]));
+  }
+
+  function hasRosterArea(sheet) {
+    return cellText(sheet.getCell("J1")) === ROSTER_TITLE || cellText(sheet.getCell("J2")) === "名冊買家帳號" ||
+      cellText(sheet.getCell("K2")) === "名冊買家UID" || cellText(sheet.getCell("L1")).startsWith(ROSTER_PREFIX);
+  }
+
+  function writeBuyerRoster(sheet, model) {
+    const visible = [...model.confirmedRows, ...model.reviewRows];
+    const rows = rosterRows(Array.isArray(model.buyerRoster) ? [...model.buyerRoster, ...visible] : visible.map(row => ({ account: row.account, buyerUid: "" })));
+    const meta = { schema: 1, session: normalizeText(model.session), scope: Array.isArray(model.buyerRoster) ? "來源 CSV" : "本檔可見買家", count: rows.length };
+    meta.fingerprint = rosterFingerprint(meta, rows);
+    sheet.getCell("J1").value = ROSTER_TITLE;
+    sheet.getCell("J2").value = "名冊買家帳號";
+    sheet.getCell("K2").value = "名冊買家UID";
+    sheet.getCell("L1").value = ROSTER_PREFIX + JSON.stringify(meta);
+    sheet.getColumn(10).width = 24; sheet.getColumn(11).width = 22; sheet.getColumn(12).width = 28;
+    sheet.getColumn(10).numFmt = "@"; sheet.getColumn(11).numFmt = "@"; sheet.getColumn(12).numFmt = "@";
+    rows.forEach((row, index) => {
+      sheet.getCell(index + 3, 10).value = row.account;
+      sheet.getCell(index + 3, 11).value = row.buyerUid;
+    });
+    return { meta, rows };
+  }
+
+  function readBuyerRoster(sheet, session) {
+    if (!hasRosterArea(sheet)) return { accounts: null, warning: MISSING_ROSTER_WARNING };
+    try {
+      const raw = cellText(sheet.getCell("L1"));
+      if (!raw.startsWith(ROSTER_PREFIX)) throw new Error();
+      const meta = JSON.parse(raw.slice(ROSTER_PREFIX.length));
+      if (meta.schema !== 1 || meta.session !== session || !["來源 CSV", "本檔可見買家"].includes(meta.scope) ||
+          !Number.isSafeInteger(meta.count) || meta.count < 0 || meta.count > Math.max(0, sheet.rowCount - 2) ||
+          cellText(sheet.getCell("J1")) !== ROSTER_TITLE || cellText(sheet.getCell("J2")) !== "名冊買家帳號" || cellText(sheet.getCell("K2")) !== "名冊買家UID") throw new Error();
+      const rawRows = Array.from({ length: meta.count }, (_, index) => {
+        const result = effectiveBuyerText(sheet.getCell(index + 3, 10).value);
+        if (!result.ok || !result.text) throw new Error();
+        return { account: result.text, buyerUid: readBuyerUid(sheet.getCell(index + 3, 11).value) };
+      });
+      const rows = rosterRows(rawRows);
+      if (rows.length !== rawRows.length || rosterFingerprint(meta, rows) !== meta.fingerprint) throw new Error();
+      return { accounts: new Map(rows.map(row => [row.account, row.buyerUid])), meta, warning: "" };
+    } catch { return { accounts: null, warning: INVALID_ROSTER_WARNING }; }
+  }
+
   function buildReviewModel(parsed) {
+    const buyerRoster = rosterRows(parsed.records);
     const grouped = new Map();
     const products = new Map();
     const sessions = new Set();
@@ -343,6 +494,7 @@
         grouped.set(key, {
           bucket: record.bucket,
           account: record.account,
+          buyerUid: record.buyerUid || "",
           code: record.code,
           productName: record.productName,
           color: record.color,
@@ -386,6 +538,7 @@
       }));
 
     return {
+      buyerRoster,
       session: [...sessions].join("、"),
       confirmedRows: sortRows(
         rows.filter((row) => row.bucket === "confirmed"),
@@ -444,6 +597,7 @@
       sheet.getColumn(index + 1).width = width;
     });
     sheet.getColumn(6).numFmt = "0";
+    sheet.getColumn(1).numFmt = "@";
     sheet.getColumn(7).numFmt = "#,##0";
 
     for (let rowNumber = 6; rowNumber <= lastDataRow; rowNumber += 1) {
@@ -513,6 +667,7 @@
         row.size || null,
         row.quantity,
       ];
+      sheet.getCell(rowNumber, 1).numFmt = "@";
       const product = productsByCode.get(row.code);
       const hasMultipleSourcePrices =
         (product?.sourcePrices?.length || 0) > 1;
@@ -669,6 +824,13 @@
   }
 
   async function createReviewWorkbook(model, config = DEFAULT_CONFIG) {
+    const errors = [];
+    for (const [label, rows] of [["已確認", model.confirmedRows], ["待確認", model.reviewRows]]) {
+      rows.forEach((row, index) => {
+        if (typeof row.account !== "string" || !validateBuyerAccount(row.account).ok) errors.push(accountProblem(`「${label}」第 ${index + 6} 列`, row.account));
+      });
+    }
+    if (errors.length) throw buyerAccountError(errors);
     if (typeof ExcelJS === "undefined") {
       throw new Error("Excel 元件尚未載入，請重新整理頁面後再試。");
     }
@@ -708,6 +870,7 @@
       { ...DEFAULT_CONFIG, ...config },
       model.session,
     );
+    writeBuyerRoster(settingsSheet, model);
     return workbook.xlsx.writeBuffer();
   }
 
@@ -768,7 +931,9 @@
       rowNumber <= sheet.rowCount;
       rowNumber += 1
     ) {
-      const account = cellText(sheet.getCell(rowNumber, 1));
+      const accountCell = sheet.getCell(rowNumber, 1);
+      const accountResult = validateBuyerAccount(accountCell.value);
+      const account = accountResult.text;
       const code = cellText(sheet.getCell(rowNumber, 2)).toUpperCase();
       const productName = cellText(sheet.getCell(rowNumber, 3));
       const color = cellText(sheet.getCell(rowNumber, 4));
@@ -787,8 +952,9 @@
         size,
         cellText(quantityCell),
         cellText(amountCell),
-      ].some(Boolean);
+      ].some(Boolean) || (!accountResult.ok && accountCell.value != null);
       if (!hasAnyValue) continue;
+      if (!accountResult.ok) { errors.push(accountProblem(`「${sheet.name}」第 ${rowNumber} 列`, accountCell.value)); continue; }
 
       // v1.1.6：商品名稱／顏色／尺寸改為選填。
       // 直播抓單常常只抓到顏色（上衣類無尺寸），甚至整個規格欄都是空的；
@@ -845,6 +1011,7 @@
       rowNumber += 1
     ) {
       for (let column = 1; column <= 20; column += 1) {
+        if (column >= 10 && column <= 12 && hasRosterArea(settingsSheet)) continue;
         if (
           cellText(settingsSheet.getCell(rowNumber, column)) === "商品編號" &&
           cellText(settingsSheet.getCell(rowNumber, column + 3)) === "審核單價"
@@ -886,6 +1053,7 @@
       rowNumber += 1
     ) {
       for (let column = 1; column <= 20; column += 1) {
+        if (column >= 10 && column <= 12 && hasRosterArea(settingsSheet)) continue;
         if (
           cellText(settingsSheet.getCell(rowNumber, column)) === "商品編號" &&
           cellText(settingsSheet.getCell(rowNumber, column + 2)) ===
@@ -940,6 +1108,7 @@
       rowNumber += 1
     ) {
       for (let column = 1; column <= 20; column += 1) {
+        if (column >= 10 && column <= 12 && hasRosterArea(settingsSheet)) continue;
         const label = cellText(settingsSheet.getCell(rowNumber, column));
         if (!labels.has(label)) continue;
         const settingCell = settingsSheet.getCell(rowNumber, column + 1);
@@ -1369,6 +1538,12 @@
     return `"${protectCsvFormula(value).replace(/"/gu, '""')}"`;
   }
 
+  function quoteBuyerAccountCsv(value) {
+    const guarded = protectCsvFormula(value);
+    const literal = guarded ? `="${guarded.replace(/"/gu, '""')}"` : "";
+    return `"${literal.replace(/"/gu, '""')}"`;
+  }
+
   function buildUnsentCsv(view) {
     const headers = [
       "買家帳號",
@@ -1387,7 +1562,9 @@
       row.message,
     ]);
     return `\uFEFF${[headers, ...rows]
-      .map((row) => row.map(quoteCsvCell).join(","))
+      .map((row, index) => row.map((value, column) => index > 0 && column === 0
+        ? quoteBuyerAccountCsv(value)
+        : quoteCsvCell(value)).join(","))
       .join("\r\n")}`;
   }
 
@@ -1828,18 +2005,31 @@
       ...fallbackConfig,
     });
     const rows = readReviewedRows(confirmed);
+    const roster = readBuyerRoster(settingsSheet, settings.session);
+    const identityWarnings = roster.warning ? [roster.warning] : [];
+    const outside = [];
+    for (const row of rows) {
+      row.buyerUid = roster.accounts?.get(row.account) || "";
+      if (roster.accounts && !roster.accounts.has(row.account)) outside.push(row.account);
+    }
+    if (outside.length) identityWarnings.push(`名冊外帳號：${[...new Set(outside)].join("、")}；請核對原始資料與發送預覽。`);
     if (!rows.length) {
       throw new Error(
         "「已確認」工作表沒有可發送的資料列；待確認資料不會自動併入。",
       );
     }
-    return buildQueue(
+    const queue = buildQueue(
       rows,
       readReviewedPrices(settingsSheet),
       settings,
       settings.session,
       readMultiPriceCodes(settingsSheet),
     );
+    queue.reviewWarnings = [...queue.warnings];
+    queue.identityWarnings = identityWarnings;
+    queue.warnings.push(...identityWarnings);
+    queue.buyerRoster = roster.meta || null;
+    return queue;
   }
 
   function downloadBlob(blob, filename) {
@@ -2818,6 +3008,7 @@
         ? `Session：${state.queue.session || "未標示"}\n共 ${queueSummary.total} 位；已發送 ${queueSummary.sent}；內容已變動 ${queueSummary.changed}；可能已發送 ${queueSummary.uncertain}；預設可發送 ${queueSummary.sendByDefault}`
         : "尚未手動匯入已審核 Excel。";
       if (state.queue?.chargeShopeeFee) summary.textContent += "\n手續費：10%，每位買家合計後捨去小數。";
+      if (state.queue?.warnings?.length) summary.textContent += `\n請先核對：\n${state.queue.warnings.join("\n")}`;
       xlsxInput.disabled = state.running || state.importing;
       shopeeFee.disabled = state.running || state.importing;
       messageDates.classList.toggle("wl-hidden", !state.queue);
@@ -3230,6 +3421,12 @@
   }
 
   const testApi = {
+    buyerValueDisplay,
+    effectiveBuyerText,
+    validateBuyerAccount,
+    readBuyerUid,
+    rosterRows,
+    readBuyerRoster,
     totalWithShopeeFee,
     normalizeText,
     normalizeCsvCell,

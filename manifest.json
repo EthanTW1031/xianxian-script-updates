@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "publishedAt": "2026-10-03T07:24:02.876Z",
+  "publishedAt": "2026-10-09T02:54:32.470Z",
   "scripts": [
     {
       "id": "fb-inbox-finder",
@@ -46,21 +46,21 @@
       "id": "shopee-auto-detail-reply",
       "name": "Shopee 自動回覆明細",
       "namespace": "local.shopee.auto-reply-detail",
-      "version": "1.4.2",
+      "version": "1.4.3",
       "file": "scripts/shopee-auto-detail-reply.user.js",
-      "sha256": "e4cdc48f5f50f394cfb37be8ca1dfa4a427f83b5caf4eb51229db38796ccbb46",
-      "bytes": 113997,
-      "updatedAt": "2026-10-03T07:24:02.876Z"
+      "sha256": "b3db1a61299d49d83c16a34f8f59420fee104632ef48832c462a054788920fd4",
+      "bytes": 125254,
+      "updatedAt": "2026-10-09T02:54:32.470Z"
     },
     {
       "id": "shopee-live-order-capture",
       "name": "Shopee Live Order Capture",
       "namespace": "https://github.com/EthanTW1031/Shopee",
-      "version": "0.4.0",
+      "version": "0.4.1",
       "file": "scripts/shopee-live-order-capture.user.js",
-      "sha256": "d93d90c0552f30b839a21b65d3c21cd9a67ec26de403da85c4a6497ddc1716e5",
-      "bytes": 252887,
-      "updatedAt": "2026-09-25T06:48:20.407Z"
+      "sha256": "614fb14cbb1a9613b71397096d7918b67257a1b65d9025edd1e834350fc9f476",
+      "bytes": 253186,
+      "updatedAt": "2026-10-09T02:54:32.470Z"
     }
   ]
 }
