@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Jambo 商品庫存
 // @namespace    https://jambolive.tv/
-// @version      2.0.0
-// @description  獨立匯出含圖片的商品庫存與五欄商品清單 XLSX
+// @version      2.1.0
+// @description  獨立匯出含圖片、成本價與直購價的商品庫存及五欄商品清單 XLSX
 // @match        https://jambolive.tv/console/commodity/*
 // @require      https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js
 // @grant        GM_xmlhttpRequest
@@ -394,6 +394,33 @@
     };
   }
 
+  function extractInventoryPrices(nameElement, catalogProduct) {
+    const costText = readProductInfoValue(
+      findProductInfoTable(nameElement),
+      '成本'
+    );
+    const cost = parseMoney(costText);
+    const directPurchasePrice =
+      Number.isSafeInteger(catalogProduct.price) && catalogProduct.price > 0
+        ? catalogProduct.price
+        : null;
+
+    return {
+      cost,
+      directPurchasePrice,
+      costIssue:
+        cost === null
+          ? `成本價「${costText || '空白'}」必須是 0 以上整數`
+          : '',
+      priceIssue:
+        catalogProduct.saleMethod !== '直購'
+          ? `銷售方式「${catalogProduct.saleMethod || '空白'}」不是直購，不擷取起標價`
+          : directPurchasePrice === null
+            ? '直購價缺少有效的大於 0 整數，請確認商品銷售資料'
+            : '',
+    };
+  }
+
   const getDirectCells = (row, tagName) =>
     Array.from(row.children).filter((element) => element.tagName === tagName);
 
@@ -723,6 +750,7 @@
         productGroups.push({
           productName,
           imageUrl: getProductImageUrl(nameElement),
+          prices: extractInventoryPrices(nameElement, catalogProduct),
           rows: productRows,
         });
       }
@@ -1095,7 +1123,10 @@
       { header: '商品樣式', key: 'style', width: 16 },
       { header: '商品總庫存', key: 'stock', width: 14 },
       { header: '已喊標數量', key: 'called', width: 14 },
+      { header: '成本價', key: 'cost', width: 14 },
+      { header: '直購價', key: 'directPurchasePrice', width: 14 },
     ];
+    const inventoryColumnCount = worksheet.columns.length;
     worksheet.properties.defaultRowHeight = 22.5;
 
     const headerRow = worksheet.getRow(1);
@@ -1124,12 +1155,16 @@
       };
     });
 
+    let inventoryPriceIssueCount = 0;
     for (
       let groupIndex = 0;
       groupIndex < result.productGroups.length;
       groupIndex += 1
     ) {
       const group = result.productGroups[groupIndex];
+      if (group.prices.costIssue || group.prices.priceIssue) {
+        inventoryPriceIssueCount += 1;
+      }
       const image = imageResult.images[groupIndex];
       const startRow = worksheet.rowCount + 1;
       const totalHeight = Math.max(
@@ -1147,10 +1182,17 @@
           style: values[1],
           stock: toExcelNumber(values[2]),
           called: toExcelNumber(values[3]),
+          cost: rowIndex === 0 ? group.prices.cost : null,
+          directPurchasePrice:
+            rowIndex === 0 ? group.prices.directPurchasePrice : null,
         });
         row.height = rowHeight;
 
-        for (let columnIndex = 1; columnIndex <= 5; columnIndex += 1) {
+        for (
+          let columnIndex = 1;
+          columnIndex <= inventoryColumnCount;
+          columnIndex += 1
+        ) {
           const cell = row.getCell(columnIndex);
           cell.font = {
             name: 'Microsoft JhengHei',
@@ -1191,6 +1233,8 @@
       if (endRow > startRow) {
         worksheet.mergeCells(startRow, 1, endRow, 1);
         worksheet.mergeCells(startRow, 2, endRow, 2);
+        worksheet.mergeCells(startRow, 6, endRow, 6);
+        worksheet.mergeCells(startRow, 7, endRow, 7);
       }
 
       const imageCell = worksheet.getCell(startRow, 1);
@@ -1206,13 +1250,32 @@
         wrapText: true,
       };
 
-      for (let columnIndex = 1; columnIndex <= 5; columnIndex += 1) {
+      for (
+        let columnIndex = 1;
+        columnIndex <= inventoryColumnCount;
+        columnIndex += 1
+      ) {
         worksheet.getCell(endRow, columnIndex).border = {
           bottom: {
             style: 'medium',
             color: { argb: 'FFCBD5E1' },
           },
         };
+      }
+
+      for (const [columnIndex, issue] of [
+        [6, group.prices.costIssue],
+        [7, group.prices.priceIssue],
+      ]) {
+        if (!issue) continue;
+        const cell = worksheet.getCell(startRow, columnIndex);
+        cell.note = issue;
+        cell.fill = {
+          type: 'pattern',
+          pattern: 'solid',
+          fgColor: { argb: 'FFFFE4E6' },
+        };
+        cell.font = { ...cell.font, color: { argb: 'FF991B1B' } };
       }
 
       if (image) {
@@ -1233,9 +1296,11 @@
 
     worksheet.getColumn('stock').numFmt = '#,##0';
     worksheet.getColumn('called').numFmt = '#,##0';
+    worksheet.getColumn('cost').numFmt = '$#,##0';
+    worksheet.getColumn('directPurchasePrice').numFmt = '$#,##0';
     worksheet.autoFilter = {
       from: 'A1',
-      to: `E${Math.max(1, worksheet.rowCount)}`,
+      to: `G${Math.max(1, worksheet.rowCount)}`,
     };
 
     const catalogSummary = buildCatalogWorksheet(
@@ -1249,6 +1314,7 @@
         type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
       }),
       failedImageCount: imageResult.failedCount,
+      inventoryPriceIssueCount,
       catalogProductCount: catalogSummary.productCount,
       catalogIssueCount: catalogSummary.issueCount,
     };
@@ -1274,8 +1340,12 @@
         xlsx.catalogIssueCount > 0
           ? `；五欄商品清單 ${xlsx.catalogIssueCount} 筆需確認`
           : '';
+      const inventoryPriceWarning =
+        xlsx.inventoryPriceIssueCount > 0
+          ? `；庫存金額 ${xlsx.inventoryPriceIssueCount} 筆需確認`
+          : '';
       showStatus(
-        `已下載 XLSX：${loadResult.loaded} 個商品、${result.outputRows.length} 筆庫存、${xlsx.catalogProductCount} 筆五欄商品${imageWarning}${catalogWarning}`
+        `已下載 XLSX：${loadResult.loaded} 個商品、${result.outputRows.length} 筆庫存、${xlsx.catalogProductCount} 筆五欄商品${imageWarning}${catalogWarning}${inventoryPriceWarning}`
       );
       console.log(
         '[Jambo 商品庫存] XLSX 完成',
