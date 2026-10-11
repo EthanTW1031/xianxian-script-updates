@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee 自動回覆明細
 // @namespace    local.shopee.auto-reply-detail
-// @version      1.4.3
+// @version      1.5.0
 // @description  聊聊頁手動匯入已審核 Excel，預覽後安全逐筆發送
 // @match        https://seller.shopee.tw/new-webchat/conversations*
 // @require      https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js
@@ -18,12 +18,13 @@
 
   // 必須與檔案開頭的 @version 完全相同：面板顯示的是這個常數，不是 @version。
   // v1.1.7 曾漏改這裡，導致面板顯示 1.1.5、現場無法判斷實際安裝版本。
-  const VERSION = "1.4.3";
+  const VERSION = "1.5.0";
   const SHIPPING_NOTICE = "僅限使用蝦皮店到店/711/全家/新竹物流方式結單";
   const STORE = Object.freeze({
     sent: "winlist-shopee:sent:v3",
     sentLegacy: "winlist-shopee:sent:v2",
     failed: "winlist-shopee:failed:v1",
+    blacklist: "winlist-shopee:blacklist:v1",
     logs: "winlist-shopee:logs:v2",
     config: "winlist-shopee:config:v2",
     panelPosition: "shopee-auto-reply:panel-position:v1",
@@ -103,6 +104,19 @@
       .replace(/\uFEFF/g, "")
       .replace(/\s+/gu, " ")
       .trim();
+  }
+  function parseBlacklist(value) {
+    const lines = Array.isArray(value) ? value : String(value ?? "").split(/\r?\n/u);
+    const accounts = lines.map(line => validateBuyerAccount(line));
+    if (accounts.some(account => !account.ok || /\s/u.test(account.text))) throw createAutomationError("BLACKLIST_INVALID", "黑名單請每行填一個完整買家帳號，不可使用日期、科學記號或含空白的帳號。");
+    return [...new Set(accounts.map(account => account.text).filter(Boolean))];
+  }
+  function loadBlacklist() { return parseBlacklist(GM_getValue(STORE.blacklist, [])); }
+  function markManualSent(sent, item, session, blacklist = [], at = new Date().toISOString()) {
+    if (blacklist.includes(item.account)) throw createAutomationError("BLACKLISTED", "此帳號已列入黑名單，不能標記為人工補送。");
+    const next = updateSentRecord(sent, item, session, "sent", at);
+    next[item.id].source = "manual";
+    return next;
   }
 
   function normalizeMultilineText(value) {
@@ -823,7 +837,272 @@
     settingsSheet.getColumn(8).width = 48;
   }
 
-  async function createReviewWorkbook(model, config = DEFAULT_CONFIG) {
+  const COMBO_PROMOTION_SCHEMA_VERSION = 1;
+  const COMBO_TITLE = "本場優惠 v1";
+  const COMBO_RESERVED_CODE = "組合優惠";
+  const COMBO_HEADERS = ["組別", "優惠商品", "算法", "件數", "金額"];
+  const COMBO_TYPES = { bundle: "幾件一組共多少", each: "幾件以上每件多少" };
+  const COMBO_FORBIDDEN_LABELS = new Set(["商品編號", "審核單價", "來源價格", "開頭範本", "結尾範本", "場次日期", "結單日", "直播Session", "場次日期來源", "結單日來源"]);
+
+  function comboError(code, message) {
+    const error = new Error(message);
+    error.code = code;
+    return error;
+  }
+
+  function comboSafe(value, label, minimum = 0) {
+    if (!Number.isSafeInteger(value) || value < minimum) {
+      const tooLarge = typeof value === "number" && (!Number.isFinite(value) || (Number.isInteger(value) && !Number.isSafeInteger(value)));
+      const message = tooLarge ? "數字太大，超出可計算範圍。" : minimum === 2
+        ? value === 0 || value == null || value === "" ? "沒有填，請填 2 以上的整數。"
+          : !Number.isInteger(value) ? "必須填整數，而且至少是 2。" : "要是 2 以上的整數。"
+        : minimum > 0 ? "沒有填，或不是大於 0 的整數。" : "必須是 0 以上的整數。";
+      throw comboError("COMBO_NUMERIC_INVALID", `${label}${message}`);
+    }
+    return value;
+  }
+
+  function parseComboProductCodes(value, label = "優惠商品") {
+    const tokens = Array.isArray(value) ? value : typeof value === "string" ? value.split(/[,，、\s]+/u).filter(Boolean) : null;
+    if (!tokens || tokens.some((token) => typeof token !== "string")) throw comboError("COMBO_V1", `${label}必須填商品編號文字。`);
+    const codes = tokens.map(normalizeProductCode);
+    if (!codes.length || codes.some((code) => !code)) throw comboError("COMBO_V1", `${label}沒有商品編號。`);
+    const seen = new Set();
+    for (const code of codes) {
+      if (seen.has(code)) throw comboError("COMBO_V2", `${label}重複商品編號 ${code}。`);
+      seen.add(code);
+    }
+    return codes.sort(naturalCompare);
+  }
+
+  function normalizeComboPromotions(input) {
+    if (input == null) return [];
+    if (!Array.isArray(input)) throw comboError("COMBO_V1", "優惠設定必須是組別清單。");
+    if (input.length > 30) throw comboError("COMBO_V12", "優惠最多 30 組。");
+    const codesUsed = new Set(), idsUsed = new Set();
+    return input.map((group, index) => {
+      const label = group?.sourceRow ? `優惠表第 ${group.sourceRow} 列／第 ${index + 1} 組：` : `第 ${index + 1} 組：`;
+      if (!group || typeof group !== "object") throw comboError("COMBO_V1", `${label}資料不完整。`);
+      const groupId = comboSafe(group.groupId, `${label}組別`, 1);
+      if (idsUsed.has(groupId)) throw comboError("COMBO_V2", `${label}組別 ${groupId} 重複。`);
+      idsUsed.add(groupId);
+      const productCodes = parseComboProductCodes(group.productCodes, `${label}優惠商品`);
+      if (productCodes.length > 20) throw comboError("COMBO_V12", `${label}最多 20 個標。`);
+      for (const code of productCodes) {
+        if (code === COMBO_RESERVED_CODE || COMBO_FORBIDDEN_LABELS.has(code)) throw comboError("COMBO_V10", `${label}${code} 是優惠表保留文字，不能設優惠。`);
+        if (codesUsed.has(code)) throw comboError("COMBO_V2", `${label}${code} 已出現在其他組。`);
+        codesUsed.add(code);
+      }
+      if (!Array.isArray(group.rules) || !group.rules.length) throw comboError("COMBO_V1", `${label}沒有優惠規則。`);
+      if (group.rules.length > 5) throw comboError("COMBO_V12", `${label}最多 5 條規則。`);
+      const ruleKeys = new Set();
+      const rules = group.rules.map((rule, ruleIndex) => {
+        const ruleLabel = rule?.sourceRow ? `優惠表第 ${rule.sourceRow} 列／組別 ${groupId}：` : `${label}第 ${ruleIndex + 1} 條：`;
+        if (!rule || !Object.hasOwn(COMBO_TYPES, rule.type)) throw comboError("COMBO_V7", `${ruleLabel}算法必須是幾件一組或幾件以上每件。`);
+        const quantity = comboSafe(rule.quantity, `${ruleLabel}件數`, 2);
+        const amount = comboSafe(rule.amount, `${ruleLabel}金額`, 1);
+        const key = `${rule.type}:${quantity}`;
+        if (ruleKeys.has(key)) throw comboError("COMBO_V9", `${ruleLabel}同算法與件數 ${quantity} 重複。`);
+        ruleKeys.add(key);
+        const normalized = { type: rule.type, quantity, amount };
+        if (rule.sourceRow) Object.defineProperty(normalized, "sourceRow", { value: rule.sourceRow });
+        return normalized;
+      });
+      const normalized = { groupId, productCodes, rules };
+      if (group.sourceRow) Object.defineProperty(normalized, "sourceRow", { value: group.sourceRow });
+      return normalized;
+    });
+  }
+
+  function validateComboPromotions(input, prices, multiPriceCodes = new Set(), rows = []) {
+    const groups = normalizeComboPromotions(input);
+    for (const [index, group] of groups.entries()) {
+      const label = `${group.sourceRow ? `優惠表第 ${group.sourceRow} 列／` : ""}第 ${index + 1} 組（${group.productCodes.join("、")}）：`;
+      let unitPrice;
+      for (const code of group.productCodes) {
+        if (!prices.has(code)) throw comboError("COMBO_V3", `${label}本場價格表沒有 ${code}。可能是這一場沒有這個標的訂單，或編號打錯；請核對後從這一組拿掉。`);
+        if (multiPriceCodes.has(code)) throw comboError("COMBO_V4", `${label}${code} 是多價商品。`);
+        const price = prices.get(code);
+        if (!Number.isSafeInteger(price) || price <= 0) throw comboError("COMBO_V6", `${label}${code} 審核單價 ${price} ${typeof price === "number" && (!Number.isFinite(price) || (Number.isInteger(price) && !Number.isSafeInteger(price))) ? "數字太大，超出可計算範圍。" : "必須是大於 0 的整數。"}`);
+        if (unitPrice != null && price !== unitPrice) throw comboError("COMBO_V5", `${label}${code} 單價 ${price} 與同組單價 ${unitPrice} 不同。`);
+        unitPrice = price;
+      }
+      for (const [ruleIndex, rule] of group.rules.entries()) {
+        const original = comboSafe(rule.quantity * unitPrice, `${label}第 ${ruleIndex + 1} 條件數 × 單價`);
+        if (rule.amount >= (rule.type === "bundle" ? original : unitPrice)) {
+          const ruleLabel = `${rule.sourceRow ? `優惠表第 ${rule.sourceRow} 列／` : ""}第 ${index + 1} 組（${group.productCodes.join("、")}）：`;
+          throw comboError("COMBO_V8", `${ruleLabel}第 ${ruleIndex + 1} 條優惠金額 ${rule.amount} 沒有比原價便宜，請連優惠規則一起修改。`);
+        }
+      }
+    }
+    for (const row of rows) if (normalizeProductCode(row.code) === COMBO_RESERVED_CODE) throw comboError("COMBO_V10", `「已確認」${formatSourceRows(row)}商品編號 ${COMBO_RESERVED_CODE} 是有優惠表時的保留字。`);
+    return groups;
+  }
+
+  function summarizeComboPromotions(items, groups) {
+    const summaryGroups = groups.map((group) => ({ groupId: group.groupId, productCodes: [...group.productCodes], unitPrice: group.unitPrice, appliedBuyerCount: 0, discountTotal: 0, skippedBuyerCount: 0 }));
+    const byId = new Map(summaryGroups.map((group) => [group.groupId, group]));
+    const applied = new Set(), skipped = new Set();
+    let discountTotal = 0, skippedBuyerGroupCount = 0;
+    for (const item of items) {
+      for (const discount of item.discounts || []) {
+        applied.add(item.account);
+        const group = byId.get(discount.groupId);
+        if (!group) throw comboError("COMBO_SUMMARY_INVALID", "折抵的組別不在優惠設定裡。");
+        group.appliedBuyerCount++;
+        group.discountTotal = comboSafe(group.discountTotal + discount.discountAmount, "組別折抵合計");
+        discountTotal = comboSafe(discountTotal + discount.discountAmount, "折抵合計");
+      }
+      for (const skip of item.promotionSkips || []) {
+        skipped.add(item.account); skippedBuyerGroupCount++;
+        const group = byId.get(skip.groupId);
+        if (!group) throw comboError("COMBO_SUMMARY_INVALID", "跳過的組別不在優惠設定裡。");
+        group.skippedBuyerCount++;
+      }
+    }
+    return { appliedBuyerCount: applied.size, discountTotal, skippedBuyerCount: skipped.size, skippedBuyerGroupCount, groups: summaryGroups };
+  }
+
+  function calculateComboPromotions(rows, groups, prices, amountSources = new Map()) {
+    const byAccount = new Map();
+    for (const row of rows) {
+      comboSafe(row.quantity, `「已確認」${formatSourceRows(row)}數量`, 1);
+      comboSafe(row.directAmount, `「已確認」${formatSourceRows(row)}小計`, 1);
+      if (!byAccount.has(row.account)) byAccount.set(row.account, { account: row.account, rows: [], originalGoodsTotal: 0, discountTotal: 0, discounts: [], promotionSkips: [] });
+      const buyer = byAccount.get(row.account);
+      buyer.rows.push(row);
+      buyer.originalGoodsTotal = comboSafe(buyer.originalGoodsTotal + row.directAmount, `${row.account} 商品小計合計`);
+    }
+    const warnings = [], summaries = [];
+    let budget = 0;
+    for (const group of groups) {
+      const unitPrice = prices.get(group.productCodes[0]);
+      const selected = new Set(group.productCodes), eligible = [];
+      let maximum = 0;
+      for (const buyer of byAccount.values()) {
+        const groupRows = buyer.rows.filter((row) => selected.has(row.code));
+        if (!groupRows.length) continue;
+        let quantity = 0, originalAmount = 0;
+        const mismatchedRows = [];
+        for (const row of groupRows) {
+          quantity = comboSafe(quantity + row.quantity, `${buyer.account}／組別 ${group.groupId} 件數`);
+          originalAmount = comboSafe(originalAmount + row.directAmount, `${buyer.account}／組別 ${group.groupId} 小計`);
+          const expectedAmount = comboSafe(row.quantity * unitPrice, `「已確認」${formatSourceRows(row)}數量 × 審核單價`);
+          if (row.directAmount !== expectedAmount) mismatchedRows.push({ sourceRow: row.sourceRow, quantity: row.quantity, reviewedUnitPrice: unitPrice, expectedAmount, actualAmount: row.directAmount, amountSource: amountSources.get(row.sourceRow) || (row.amountState === "empty" || row.amountState === "formula-missing" ? "fallback" : "number") });
+        }
+        const productCodes = [...new Set(groupRows.map((row) => row.code))].sort(naturalCompare);
+        if (mismatchedRows.length) {
+          buyer.promotionSkips.push({ groupId: group.groupId, productCodes, quantity, originalAmount, reason: "AMOUNT_MISMATCH", mismatchedRows });
+          warnings.push(`買家 ${buyer.account}／${productCodes.join("、")} 本組商品小計與數量 × 審核單價不符，本組未另套用組合優惠，採用 G 欄金額；請核對金額及公式是否已重算。`);
+        } else { eligible.push({ buyer, productCodes, quantity, originalAmount }); maximum = Math.max(maximum, quantity); }
+      }
+      budget = comboSafe(budget + maximum, "各組最大件數合計");
+      if (budget > 100_000) throw comboError("COMBO_V12", `各組最大件數合計 ${budget} 超過 100,000（組別 ${group.groupId}）。`);
+      const best = new Array(maximum + 1); best[0] = 0;
+      for (let count = 1; count <= maximum; count++) {
+        let value = comboSafe(best[count - 1] + unitPrice, `組別 ${group.groupId} 第 ${count} 件原價加法`);
+        for (const rule of group.rules) if (rule.type === "bundle" && rule.quantity <= count) value = Math.min(value, comboSafe(best[count - rule.quantity] + rule.amount, `組別 ${group.groupId} 組合價加法`));
+        best[count] = value;
+      }
+      for (const entry of eligible) {
+        const original = comboSafe(entry.quantity * unitPrice, `${entry.buyer.account}／組別 ${group.groupId} 原價`);
+        let payableAmount = best[entry.quantity];
+        for (const rule of group.rules) if (rule.type === "each" && rule.quantity <= entry.quantity) payableAmount = Math.min(payableAmount, comboSafe(entry.quantity * rule.amount, `${entry.buyer.account}／組別 ${group.groupId} 每件優惠乘法`));
+        const discountAmount = comboSafe(original - payableAmount, `${entry.buyer.account}／組別 ${group.groupId} 折抵`);
+        if (discountAmount > 0) {
+          entry.buyer.discountTotal = comboSafe(entry.buyer.discountTotal + discountAmount, `${entry.buyer.account} 折抵合計`);
+          entry.buyer.discounts.push({ groupId: group.groupId, productCodes: entry.productCodes, quantity: entry.quantity, description: `${entry.productCodes.join("、")} 共 ${entry.quantity} 件`, originalAmount: entry.originalAmount, payableAmount, discountAmount });
+        }
+      }
+      summaries.push({ groupId: group.groupId, productCodes: group.productCodes, unitPrice });
+    }
+    for (const buyer of byAccount.values()) if (buyer.originalGoodsTotal - buyer.discountTotal <= 0) throw comboError("COMBO_V11", `${buyer.account} 折抵後的商品金額必須大於 0。`);
+    return { byAccount, warnings, summary: summarizeComboPromotions([...byAccount.values()], summaries) };
+  }
+
+  function preflightComboPromotions(model, input) {
+    const prices = new Map(model.priceRows.map((row) => [row.code, row.reviewedPrice]));
+    const multi = new Set(model.priceRows.filter((row) => (row.sourcePrices?.length || 0) > 1).map((row) => row.code));
+    const rows = model.confirmedRows.map((row, index) => {
+      const price = multi.has(row.code) ? row.unitPrice : prices.get(row.code) || 0;
+      return { ...row, sourceRow: index + 6, directAmount: row.quantity * price };
+    });
+    const groups = validateComboPromotions(input, prices, multi, rows);
+    const result = calculateComboPromotions(rows, groups, prices);
+    return { comboPromotions: groups, promotionSummary: result.summary };
+  }
+
+  function comboTextCell(value) {
+    if (typeof value === "string") return value;
+    if (value && typeof value === "object" && Object.keys(value).every(key => key === "richText") &&
+      Array.isArray(value.richText) && value.richText.every(part => part && typeof part.text === "string")) {
+      return value.richText.map(part => part.text).join("");
+    }
+    return value;
+  }
+
+  function parseComboTableCells(matrix) {
+    const isBlank = (value) => value == null || value === "";
+    const title = comboTextCell(matrix[0]?.[0]);
+    const header = COMBO_HEADERS.map((_, index) => comboTextCell(matrix[1]?.[index]));
+    const hasData = matrix.slice(2).some(row => row.some(value => !isBlank(value)));
+    if (isBlank(title) && header.every(isBlank) && !hasData) return null;
+    if (title !== COMBO_TITLE) {
+      const occupied = matrix.flatMap((values, index) => values.map((value, column) =>
+        (index === 0 && column !== 0) || isBlank(value) ? null : `${String.fromCharCode(78 + column)}${index + 1}（第 ${index + 1} 列）`)).filter(Boolean);
+      throw comboError("COMBO_TABLE_INVALID", `「設定與價格」N～R 欄是本場優惠表的位置；${occupied[0] || "N1（第 1 列）"}有內容，N1 標題或版本不正確。若這一場不設定優惠，請清除這裡的內容；若要使用優惠，請修好本場優惠的標題、表頭與規則後再匯入。`);
+    }
+    for (let index = 0; index < header.length; index++) if (header[index] !== COMBO_HEADERS[index]) throw comboError("COMBO_TABLE_INVALID", `優惠表 ${String.fromCharCode(78 + index)}2 表頭必須是「${COMBO_HEADERS[index]}」。`);
+    const groups = new Map(); let ended = false;
+    for (let row = 3; row <= matrix.length; row++) {
+      const values = matrix[row - 1];
+      if (values.every(isBlank)) { ended = true; continue; }
+      if (ended) throw comboError("COMBO_TABLE_INVALID", `優惠表第 ${row} 列在空列之後仍有規則。`);
+      const [id, rawCodes, rawType, quantity, amount] = values;
+      const codeText = comboTextCell(rawCodes), typeText = comboTextCell(rawType);
+      if (!Number.isSafeInteger(id) || id <= 0 || typeof codeText !== "string" || typeof typeText !== "string" || !Number.isSafeInteger(quantity) || !Number.isSafeInteger(amount)) {
+        const tooLarge = [id, quantity, amount].some(value => typeof value === "number" && (!Number.isFinite(value) || (Number.isInteger(value) && !Number.isSafeInteger(value))));
+        throw comboError("COMBO_TABLE_INVALID", `優惠表第 ${row} 列：${tooLarge ? "數字太大，超出可計算範圍。" : "組別、件數、金額必須填整數數值，優惠商品與算法必須是文字；不接受公式、日期或其他型別。"}`);
+      }
+      const productCodes = parseComboProductCodes(codeText, `優惠表第 ${row} 列`);
+      const type = Object.keys(COMBO_TYPES).find((key) => COMBO_TYPES[key] === typeText);
+      if (!type) throw comboError("COMBO_V7", `優惠表第 ${row} 列算法不正確。`);
+      if (!groups.has(id)) groups.set(id, { groupId: id, productCodes, rules: [], sourceRow: row });
+      const group = groups.get(id);
+      if (JSON.stringify(group.productCodes) !== JSON.stringify(productCodes)) throw comboError("COMBO_TABLE_INVALID", `優惠表第 ${row} 列：組別 ${id} 的優惠商品集合不一致。`);
+      group.rules.push({ type, quantity, amount, sourceRow: row });
+    }
+    return normalizeComboPromotions([...groups.values()]);
+  }
+
+  function comboTableFromSheet(sheet) {
+    const matrix = Array.from({ length: Math.max(2, sheet.rowCount) }, (_, index) => COMBO_HEADERS.map((_, column) => sheet.getCell(index + 1, column + 14).value));
+    return parseComboTableCells(matrix);
+  }
+
+  function writeComboTable(confirmed, settingsSheet, groups, count) {
+    const marker = count + 6;
+    confirmed.getCell(marker, 2).value = COMBO_RESERVED_CODE;
+    confirmed.getCell(marker, 3).value = "本場有設定組合優惠，折抵由聊聊腳本計算；腳本要 1.5.0 以上。請不要刪除這一列。";
+    confirmed.getCell(marker, 3).alignment = { wrapText: true, vertical: "middle" };
+    settingsSheet.getCell("N1").value = COMBO_TITLE;
+    settingsSheet.getCell("O1").value = "改這張表會改變每位買家的折抵；改完存檔再匯入";
+    COMBO_HEADERS.forEach((value, index) => { settingsSheet.getCell(2, 14 + index).value = value; });
+    let row = 3;
+    for (const group of groups) for (const rule of group.rules) {
+      [group.groupId, group.productCodes.join("、"), COMBO_TYPES[rule.type], rule.quantity, rule.amount].forEach((value, index) => { settingsSheet.getCell(row, 14 + index).value = value; });
+      settingsSheet.getCell(row, 16).dataValidation = { type: "list", allowBlank: false, formulae: ['"幾件一組共多少,幾件以上每件多少"'], showErrorMessage: true, errorTitle: "算法不正確", error: "請選擇其中一種算法。" };
+      row++;
+    }
+    [10, 28, 24, 12, 14].forEach((width, index) => { settingsSheet.getColumn(14 + index).width = width; });
+    for (let column = 14; column <= 18; column++) {
+      const cell = settingsSheet.getCell(2, column);
+      cell.font = { bold: true, color: { argb: "FFFFFFFF" } };
+      cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF115E59" } };
+    }
+  }
+
+  async function createReviewWorkbook(model, config = DEFAULT_CONFIG, options = {}) {
     const errors = [];
     for (const [label, rows] of [["已確認", model.confirmedRows], ["待確認", model.reviewRows]]) {
       rows.forEach((row, index) => {
@@ -834,6 +1113,8 @@
     if (typeof ExcelJS === "undefined") {
       throw new Error("Excel 元件尚未載入，請重新整理頁面後再試。");
     }
+    const promotionInput = options.comboPromotions;
+    const promotionPreflight = promotionInput != null && (!Array.isArray(promotionInput) || promotionInput.length) ? preflightComboPromotions(model, promotionInput) : null;
     const workbook = new ExcelJS.Workbook();
     workbook.creator = "Shopee 自動回覆明細";
     workbook.created = new Date();
@@ -871,6 +1152,7 @@
       model.session,
     );
     writeBuyerRoster(settingsSheet, model);
+    if (promotionPreflight) writeComboTable(confirmed, settingsSheet, promotionPreflight.comboPromotions, model.confirmedRows.length);
     return workbook.xlsx.writeBuffer();
   }
 
@@ -919,7 +1201,7 @@
     return 0;
   }
 
-  function readReviewedRows(sheet) {
+  function readReviewedRows(sheet, markerRows = null) {
     const headerRow = findHeaderRow(sheet);
     if (!headerRow) {
       throw new Error(`${sheet.name} 找不到七欄資料表頭。`);
@@ -931,6 +1213,7 @@
       rowNumber <= sheet.rowCount;
       rowNumber += 1
     ) {
+      if (markerRows?.has(rowNumber)) continue;
       const accountCell = sheet.getCell(rowNumber, 1);
       const accountResult = validateBuyerAccount(accountCell.value);
       const account = accountResult.text;
@@ -1091,7 +1374,7 @@
     return codes;
   }
 
-  function readMessageSettings(settingsSheet, fallback = DEFAULT_CONFIG) {
+  function readMessageSettings(settingsSheet, fallback = DEFAULT_CONFIG, ignoreComboArea = false) {
     const values = {};
     const labels = new Set([
       "開頭範本",
@@ -1108,6 +1391,7 @@
       rowNumber += 1
     ) {
       for (let column = 1; column <= 20; column += 1) {
+        if (ignoreComboArea && column >= 14 && column <= 18) continue;
         if (column >= 10 && column <= 12 && hasRosterArea(settingsSheet)) continue;
         const label = cellText(settingsSheet.getCell(rowNumber, column));
         if (!labels.has(label)) continue;
@@ -1333,8 +1617,9 @@
     };
   }
 
-  function resolveQueueItemState(item, sent) {
+  function resolveQueueItemState(item, sent, blacklist = []) {
     const record = sent?.[item.id] || null;
+    if (blacklist.includes(item.account)) return { deliveryStatus: "excluded", contentChanged: false, sendByDefault: false, record };
     if (!record) {
       return {
         deliveryStatus: "none",
@@ -1355,14 +1640,16 @@
     };
   }
 
-  function queueItemStatusLabel(item, sent) {
-    const itemState = resolveQueueItemState(item, sent);
+  function queueItemStatusLabel(item, sent, blacklist = []) {
+    const itemState = resolveQueueItemState(item, sent, blacklist);
+    if (itemState.deliveryStatus === "excluded") return "（黑名單排除）";
     if (itemState.deliveryStatus === "uncertain") {
       return itemState.contentChanged
         ? "（可能已發送，且內容已變動）"
         : "（可能已發送，請先看一下聊聊）";
     }
     if (itemState.deliveryStatus === "sent") {
+      if (itemState.record?.source === "manual") return itemState.contentChanged ? "（已人工補送，內容已變動）" : "（已人工補送）";
       return itemState.contentChanged
         ? "（內容已變動，建議重發）"
         : "（已發送）";
@@ -1370,10 +1657,12 @@
     return "";
   }
 
-  function summarizeQueueStates(items, sent) {
-    const states = items.map((item) => resolveQueueItemState(item, sent));
+  function summarizeQueueStates(items, sent, blacklist = []) {
+    const states = items.map((item) => resolveQueueItemState(item, sent, blacklist));
     return {
       total: items.length,
+      manualSent: states.filter(state => state.deliveryStatus === "sent" && state.record?.source === "manual").length,
+      excluded: states.filter(state => state.deliveryStatus === "excluded").length,
       sent: states.filter(
         (itemState) => itemState.deliveryStatus === "sent",
       ).length,
@@ -1395,14 +1684,14 @@
   function requireExactSearchResult(result) {
     if (result) return result;
     throw createAutomationError(
-      "BUYER_NOT_FOUND",
-      "搜尋不到完全相同的買家帳號，已跳過。",
+      "SEARCH_UNCONFIRMED",
+      "20 秒內未辨識到完全相同的搜尋結果，搜尋未確認，未送出；請人工核對，不能據此認定帳號不存在。",
     );
   }
 
   function failureCategory(code) {
-    return code === "BUYER_NOT_FOUND"
-      ? "buyer_not_found"
+    return ["BUYER_NOT_FOUND", "SEARCH_UNCONFIRMED"].includes(code)
+      ? "search_unconfirmed"
       : "process_failed";
   }
 
@@ -1470,17 +1759,19 @@
     return next;
   }
 
-  function buildUnsentViewModel(items, sent, failed) {
+  function buildUnsentViewModel(items, sent, failed, blacklist = []) {
     const view = {
       totalExcel: (items || []).length,
       totalUnsent: 0,
       uncertain: [],
       buyerNotFound: [],
+      searchUnconfirmed: [],
+      excluded: [],
       processFailed: [],
       unattempted: [],
     };
     for (const item of items || []) {
-      const itemState = resolveQueueItemState(item, sent);
+      const itemState = resolveQueueItemState(item, sent, blacklist);
       if (itemState.deliveryStatus === "sent") continue;
       const failedRecord = failed?.[item.id] || null;
       const row = {
@@ -1493,12 +1784,14 @@
         at: normalizeText(failedRecord?.at),
         messageHash: item.messageHash,
       };
-      if (itemState.deliveryStatus === "uncertain") {
+      if (itemState.deliveryStatus === "excluded") {
+        view.excluded.push({ ...row, code: "BLACKLISTED", reason: "使用者明確列入黑名單，不發送", stage: "EXCLUDED" });
+      } else if (itemState.deliveryStatus === "uncertain") {
         view.uncertain.push(row);
       } else if (!failedRecord) {
         view.unattempted.push(row);
-      } else if (failureCategory(failedRecord.code) === "buyer_not_found") {
-        view.buyerNotFound.push(row);
+      } else if (failureCategory(failedRecord.code) === "search_unconfirmed") {
+        view.searchUnconfirmed.push(row);
       } else {
         view.processFailed.push(row);
       }
@@ -1506,12 +1799,14 @@
     for (const rows of [
       view.uncertain,
       view.buyerNotFound,
+      view.searchUnconfirmed,
       view.processFailed,
       view.unattempted,
     ]) {
       rows.sort((left, right) => naturalCompare(left.account, right.account));
       view.totalUnsent += rows.length;
     }
+    view.excluded.sort((left, right) => naturalCompare(left.account, right.account));
     return view;
   }
 
@@ -1521,7 +1816,9 @@
         .sort((left, right) => naturalCompare(left.account, right.account))
         .map((row) => ({ ...row, categoryLabel }));
     return [
-      ...withLabel(view.buyerNotFound, "找不到帳號"),
+      ...withLabel(view.excluded || [], "黑名單排除"),
+      ...withLabel(view.searchUnconfirmed || [], "搜尋未確認"),
+      ...withLabel(view.buyerNotFound || [], "搜尋未確認（舊紀錄）"),
       ...withLabel(view.uncertain, "可能已發送"),
       ...withLabel(view.processFailed, "中途失敗"),
       ...withLabel(view.unattempted, "尚未嘗試"),
@@ -1583,7 +1880,9 @@
         lines.push(details.join("\n"));
       }
     };
-    append("⛔ 找不到帳號", view.buyerNotFound);
+    append("黑名單排除", view.excluded || []);
+    append("搜尋未確認", view.searchUnconfirmed || []);
+    append("搜尋未確認（舊紀錄）", view.buyerNotFound || []);
     append("❓ 可能已發送", view.uncertain);
     append("⚠️ 中途失敗", view.processFailed);
     if (view.unattempted.length) {
@@ -1610,7 +1909,7 @@
       kind: uncertain || unsent ? "warn" : "success",
       message:
         `本輪完成：確定送出 ${sent} 位、可能已發送 ${uncertain} 位、` +
-        `未送出 ${unsent} 位（找不到帳號 ${buyerNotFound}、中途失敗 ${processFailed}）。`,
+        `未送出 ${unsent} 位（搜尋未確認 ${buyerNotFound}、中途失敗 ${processFailed}）。`,
     };
   }
 
@@ -1776,6 +2075,7 @@
     config,
     session = "",
     multiPriceCodes = new Set(),
+    comboOptions = null,
   ) {
     if (!normalizeText(config.closingDate) && String(config.closingTemplate ?? "").includes("{結單日}")) {
       throw new Error("結單日已留空，但結尾範本仍含 {結單日}；請刪除結尾的日期句，或填入結單日。");
@@ -1889,6 +2189,9 @@
       );
     }
 
+    const comboGroups = comboOptions ? validateComboPromotions(comboOptions.comboPromotions, prices, multiPriceCodes, finalizedRows) : null;
+    const comboResult = comboGroups ? calculateComboPromotions(finalizedRows, comboGroups, prices, comboOptions.amountSources) : null;
+    if (comboResult) warnings.push(...comboResult.warnings);
     const mergedRows = mergeReviewedRows(finalizedRows);
     const byAccount = new Map();
     for (const row of mergedRows) {
@@ -1902,7 +2205,9 @@
     const items = [...byAccount.entries()]
       .sort(([left], [right]) => naturalCompare(left, right))
       .map(([account, accountRows]) => {
-        const goodsTotal = accountRows.reduce((sum, row) => sum + row.amount, 0);
+        const originalGoodsTotal = accountRows.reduce((sum, row) => sum + row.amount, 0);
+        const promotion = comboResult?.byAccount.get(account);
+        const goodsTotal = promotion ? originalGoodsTotal - promotion.discountTotal : originalGoodsTotal;
         const chargeShopeeFee = config.chargeShopeeFee === true;
         const total = chargeShopeeFee ? totalWithShopeeFee(goodsTotal) : goodsTotal;
         const opening = applyTemplate(config.openingTemplate, {
@@ -1929,6 +2234,7 @@
           opening,
           `${account}：`,
           ...lines,
+          ...(promotion ? promotion.discounts.map((discount) => `組合優惠（${discount.description}）-$${formatMoney(discount.discountAmount)}`) : []),
           chargeShopeeFee
             ? `總金額為：$${formatMoney(goodsTotal)} + 10%手續費 = ${total}`
             : `總金額為：$${formatMoney(total)}`,
@@ -1947,6 +2253,7 @@
           feeAmount: total - goodsTotal,
           total,
           message,
+          ...(promotion ? { originalGoodsTotal, discountTotal: promotion.discountTotal, discounts: promotion.discounts, promotionSkips: promotion.promotionSkips } : {}),
         };
       });
     return {
@@ -1960,6 +2267,7 @@
       closingDateSource: config.closingDateSource || "來源不明",
       items,
       warnings: [...new Set(warnings)],
+      ...(comboResult ? { promotionSchemaVersion: COMBO_PROMOTION_SCHEMA_VERSION, comboPromotions: comboGroups, promotionSummary: comboResult.summary } : {}),
     };
   }
 
@@ -1979,7 +2287,7 @@
     );
   }
 
-  async function readReviewedWorkbook(arrayBuffer, fallbackConfig = DEFAULT_CONFIG) {
+  async function readReviewedWorkbook(arrayBuffer, fallbackConfig = DEFAULT_CONFIG, options = {}) {
     if (typeof ExcelJS === "undefined") {
       throw new Error("Excel 元件尚未載入，請重新整理頁面後再試。");
     }
@@ -2000,11 +2308,22 @@
           "請重新用程式產生一份 Excel，再重新匯入。",
       );
     }
+    const comboPromotions = comboTableFromSheet(settingsSheet);
+    const markerRows = new Set(), amountSources = new Map();
+    if (comboPromotions !== null) {
+      for (let row = findHeaderRow(confirmed) + 1; row <= confirmed.rowCount; row++) {
+        const blank = (value) => value == null || value === "";
+        if (confirmed.getCell(row, 2).value === COMBO_RESERVED_CODE && [1, 6, 7].every((column) => blank(confirmed.getCell(row, column).value))) markerRows.add(row);
+        const amount = confirmed.getCell(row, 7).value;
+        amountSources.set(row, amount && typeof amount === "object" && ("formula" in amount || "sharedFormula" in amount) ? amount.result == null || amount.result === "" ? "fallback" : "formula-result" : amount == null || amount === "" ? "fallback" : "number");
+      }
+    }
     const settings = readMessageSettings(settingsSheet, {
       ...DEFAULT_CONFIG,
       ...fallbackConfig,
-    });
-    const rows = readReviewedRows(confirmed);
+    }, comboPromotions !== null);
+    const rows = readReviewedRows(confirmed, comboPromotions !== null ? markerRows : null);
+    if (comboPromotions !== null) validateComboPromotions(comboPromotions, readReviewedPrices(settingsSheet), readMultiPriceCodes(settingsSheet), rows);
     const roster = readBuyerRoster(settingsSheet, settings.session);
     const identityWarnings = roster.warning ? [roster.warning] : [];
     const outside = [];
@@ -2013,7 +2332,7 @@
       if (roster.accounts && !roster.accounts.has(row.account)) outside.push(row.account);
     }
     if (outside.length) identityWarnings.push(`名冊外帳號：${[...new Set(outside)].join("、")}；請核對原始資料與發送預覽。`);
-    if (!rows.length) {
+    if (!rows.length && !(options.allowEmptyCombo === true && comboPromotions !== null && markerRows.size > 0)) {
       throw new Error(
         "「已確認」工作表沒有可發送的資料列；待確認資料不會自動併入。",
       );
@@ -2024,7 +2343,9 @@
       settings,
       settings.session,
       readMultiPriceCodes(settingsSheet),
+      comboPromotions !== null ? { comboPromotions, amountSources } : null,
     );
+    if (comboPromotions !== null && !markerRows.size) queue.warnings.push("這份發送表的優惠標記列被刪除了；請確認每個人的聊聊腳本都是 1.5.0 以上，舊版會照原價發");
     queue.reviewWarnings = [...queue.warnings];
     queue.identityWarnings = identityWarnings;
     queue.warnings.push(...identityWarnings);
@@ -2573,8 +2894,11 @@
     reportStage("SEARCH_TYPED");
 
     const result = await waitFor(
-      () => exactSearchResult(item.account, searchInput),
-      8000,
+      () => {
+        if (navigator.onLine === false || !document.contains(searchInput) || !visible(searchInput) || normalizeText(searchInput.value) !== item.account) throw createAutomationError("SEARCH_UNRELIABLE", "搜尋框、搜尋文字或網路狀態已變動，未送出；請人工核對。");
+        return exactSearchResult(item.account, searchInput);
+      },
+      20000,
       stopRequested,
     );
     requireExactSearchResult(result);
@@ -2682,6 +3006,7 @@
       queue: null,
       sent: loadSentHistory(),
       failed: loadFailedHistory(),
+      blacklist: loadBlacklist(),
       logs: GM_getValue(STORE.logs, []),
       running: false,
       importing: false,
@@ -2699,10 +3024,12 @@
       </div>
       <div class="wl-section">
         <h3>2. 發送前預覽</h3>
+        <details><summary>黑名單（所有場次都不發送）</summary><label class="wl-field"><span>每行一個完整帳號</span><textarea data-blacklist rows="3"></textarea></label><button class="wl-btn" data-save-blacklist type="button">儲存黑名單</button><p class="wl-mini">修改後需按儲存才生效。名單只存於明細腳本；預檢名單需另行維護。</p><div class="wl-status" data-blacklist-status></div></details>
         <div class="wl-status" data-summary></div>
         <div class="wl-status wl-warn wl-hidden" data-message-dates></div>
         <label class="wl-field"><span>買家</span><select data-preview-select></select></label>
         <div class="wl-preview" data-preview></div>
+        <div class="wl-actions"><button class="wl-btn" data-mark-manual type="button">這位明細已人工補送</button><button class="wl-btn" data-mark-blocked type="button">這位列入黑名單</button></div>
         <div class="wl-actions"><button class="wl-btn" data-clear-import type="button">清除已匯入 Excel</button></div>
       </div>
       <div class="wl-section">
@@ -2739,7 +3066,7 @@
         <h3 data-unsent-title>5. 未送出清單</h3>
         <div class="wl-unsent-block wl-error wl-hidden" data-unsent-not-found>
           <strong data-unsent-not-found-title></strong>
-          <div class="wl-mini">不要直接重跑。請先請買家主動密賣場，或改用其他管道通知。</div>
+          <div class="wl-mini">搜尋未確認不代表帳號不存在；請核對聊聊與載入狀態，再決定是否重查。</div>
           <div class="wl-unsent-list" data-unsent-not-found-list></div>
         </div>
         <div class="wl-unsent-block wl-warn wl-hidden" data-unsent-uncertain>
@@ -2753,6 +3080,7 @@
           <div class="wl-unsent-list" data-unsent-failed-list></div>
         </div>
         <div class="wl-unsent-block wl-unsent-neutral wl-hidden" data-unsent-unattempted></div>
+        <div class="wl-unsent-block wl-unsent-neutral wl-hidden" data-excluded></div>
         <div class="wl-actions">
           <button class="wl-btn" data-unsent-copy type="button">複製清單</button>
           <button class="wl-btn" data-unsent-export type="button">匯出未送出 CSV</button>
@@ -2769,6 +3097,13 @@
     const messageDates = shell.root.querySelector("[data-message-dates]");
     const previewSelect = shell.root.querySelector("[data-preview-select]");
     const preview = shell.root.querySelector("[data-preview]");
+    const manualButton = shell.root.querySelector("[data-mark-manual]");
+    const blockedButton = shell.root.querySelector("[data-mark-blocked]");
+    const blacklistInput = shell.root.querySelector("[data-blacklist]");
+    const blacklistButton = shell.root.querySelector("[data-save-blacklist]");
+    const blacklistStatus = shell.root.querySelector("[data-blacklist-status]");
+    const excludedList = shell.root.querySelector("[data-excluded]");
+    blacklistInput.value = state.blacklist.join("\n");
     const testMode = shell.root.querySelector("[data-test-mode]");
     const testCount = shell.root.querySelector("[data-test-count]");
     const authorize = shell.root.querySelector("[data-authorize]");
@@ -2884,7 +3219,7 @@
         !isDeleteConfirmation(resetSentInput.value);
     };
     const renderResendControls = () => {
-      const items = state.queue?.items || [];
+      const items = (state.queue?.items || []).filter(item => !state.blacklist.includes(item.account));
       const hasHistory =
         state.queue &&
         sessionRecordCount(state.sent, state.queue.session) > 0;
@@ -2924,24 +3259,27 @@
         state.queue?.items || [],
         state.sent,
         state.failed,
+        state.blacklist,
       );
       const hasQueue = Boolean(state.queue);
       unsentSection.classList.toggle(
         "wl-hidden",
-        !hasQueue || !view.totalUnsent,
+        !hasQueue || (!view.totalUnsent && !view.excluded.length),
       );
       knownNotFound.classList.toggle(
         "wl-hidden",
-        !hasQueue || !view.buyerNotFound.length,
+        !hasQueue || !view.searchUnconfirmed.length,
       );
-      knownNotFound.textContent = view.buyerNotFound.length
-        ? `這份 Excel 有 ${view.buyerNotFound.length} 位上次找不到帳號；若對方尚未主動密過賣場，再跑仍會失敗並增加自動化操作痕跡。`
+      knownNotFound.textContent = view.searchUnconfirmed.length
+        ? `這份 Excel 有 ${view.searchUnconfirmed.length} 位搜尋未確認；請先人工核對，不能據此認定帳號不存在。`
         : "";
-      if (!hasQueue || !view.totalUnsent) return;
+      if (!hasQueue) return;
 
       unsentTitle.textContent =
         `5. 未送出清單（這份 Excel 共 ${view.totalExcel} 位；` +
-        `未送出／待確認 ${view.totalUnsent} 位）`;
+        `未送出／待確認 ${view.totalUnsent} 位；黑名單排除 ${view.excluded.length} 位）`;
+      excludedList.classList.toggle("wl-hidden", !view.excluded.length);
+      excludedList.textContent = view.excluded.length ? `黑名單排除（不發送）：${view.excluded.map(row => row.account).join("、")}` : "";
       const setBlock = (block, title, list, rows, formatter) => {
         block.classList.toggle("wl-hidden", !rows.length);
         title.textContent = rows.length ? formatter.title(rows.length) : "";
@@ -2951,9 +3289,9 @@
         unsentNotFound,
         unsentNotFoundTitle,
         unsentNotFoundList,
-        view.buyerNotFound,
+        view.searchUnconfirmed,
         {
-          title: (count) => `⛔ 聊聊找不到這個帳號（${count} 位）`,
+          title: (count) => `搜尋未確認（${count} 位）`,
           row: (row) => `${row.account}　$${formatMoney(row.total)}`,
         },
       );
@@ -2998,16 +3336,18 @@
       unsentUnattempted.textContent = view.unattempted.length
         ? `ℹ️ 尚未嘗試（${view.unattempted.length} 位）：這些人尚未輪到，不是執行失敗。`
         : "";
-      unsentCopy.disabled = state.running || !view.totalUnsent;
-      unsentExport.disabled = state.running || !view.totalUnsent;
+      unsentCopy.disabled = state.running || state.importing || (!view.totalUnsent && !view.excluded.length);
+      unsentExport.disabled = state.running || state.importing || (!view.totalUnsent && !view.excluded.length);
     };
     const renderQueue = () => {
       const items = state.queue?.items || [];
-      const queueSummary = summarizeQueueStates(items, state.sent);
+      const previousIndex = Number(previewSelect.value) || 0;
+      const queueSummary = summarizeQueueStates(items, state.sent, state.blacklist);
       summary.textContent = state.queue
-        ? `Session：${state.queue.session || "未標示"}\n共 ${queueSummary.total} 位；已發送 ${queueSummary.sent}；內容已變動 ${queueSummary.changed}；可能已發送 ${queueSummary.uncertain}；預設可發送 ${queueSummary.sendByDefault}`
+        ? `Session：${state.queue.session || "未標示"}\n共 ${queueSummary.total} 位；已發送 ${queueSummary.sent}（人工 ${queueSummary.manualSent}）；黑名單排除 ${queueSummary.excluded}；內容已變動 ${queueSummary.changed}；可能已發送 ${queueSummary.uncertain}；預設可發送 ${queueSummary.sendByDefault}`
         : "尚未手動匯入已審核 Excel。";
       if (state.queue?.chargeShopeeFee) summary.textContent += "\n手續費：10%，每位買家合計後捨去小數。";
+      if (state.queue?.promotionSummary) summary.textContent += `\n本場組合優惠：${state.queue.promotionSummary.appliedBuyerCount} 位買家套用，共折 $${formatMoney(state.queue.promotionSummary.discountTotal)}${state.queue.promotionSummary.skippedBuyerCount ? `；${state.queue.promotionSummary.skippedBuyerCount} 位買家有金額不符的組未另折抵` : ""}`;
       if (state.queue?.warnings?.length) summary.textContent += `\n請先核對：\n${state.queue.warnings.join("\n")}`;
       xlsxInput.disabled = state.running || state.importing;
       shopeeFee.disabled = state.running || state.importing;
@@ -3016,14 +3356,18 @@
       previewSelect.innerHTML = items
         .map(
           (item, index) =>
-            `<option value="${index}">${escapeHtml(item.account)}${queueItemStatusLabel(item, state.sent)}</option>`,
+            `<option value="${index}">${escapeHtml(item.account)}${queueItemStatusLabel(item, state.sent, state.blacklist)}</option>`,
         )
           .join("");
-      previewSelect.disabled = !items.length;
+      previewSelect.value = String(Math.min(previousIndex, Math.max(0, items.length - 1)));
+      previewSelect.disabled = state.running || state.importing || !items.length;
+      blacklistInput.disabled = blacklistButton.disabled = state.running || state.importing;
       startButton.disabled = state.running || !items.length;
       const renderSelected = () => {
         const item = items[Number(previewSelect.value) || 0];
         preview.textContent = item?.message || "沒有預覽資料";
+        manualButton.disabled = state.running || state.importing || !item || state.blacklist.includes(item.account) || state.sent[item.id]?.source === "manual";
+        blockedButton.disabled = state.running || state.importing || !item || state.blacklist.includes(item.account);
       };
       previewSelect.onchange = renderSelected;
       renderSelected();
@@ -3034,8 +3378,50 @@
     const refreshSentHistory = () => {
       state.sent = loadSentHistory();
       state.failed = loadFailedHistory();
+      state.blacklist = loadBlacklist();
       renderQueue();
     };
+    function saveBlacklist(value) {
+      const next = parseBlacklist(value);
+      GM_setValue(STORE.blacklist, next);
+      state.blacklist = next; blacklistInput.value = next.join("\n");
+      authorize.checked = resendAuthorize.checked = false;
+      blacklistStatus.textContent = `已儲存 ${next.length} 位黑名單。`;
+      renderQueue();
+    }
+    blacklistInput.addEventListener("input", () => { authorize.checked = resendAuthorize.checked = false; blacklistStatus.textContent = "尚未儲存，請按儲存黑名單。"; });
+    blacklistButton.addEventListener("click", () => {
+      if (state.running || state.importing) return;
+      try { saveBlacklist(blacklistInput.value); } catch (error) { showRunStatus(error.message, "error"); }
+    });
+    function resolveSelected(manual) {
+      if (state.running || state.importing || !state.queue) return;
+      refreshSentHistory();
+      const queue = state.queue, item = queue.items[Number(previewSelect.value) || 0];
+      if (!item || (manual && state.blacklist.includes(item.account))) return;
+      const prompt = manual
+        ? `確認已人工補送此份 Excel 的完整明細給 ${item.account}？\n場次：${queue.session || "未標示"}\n${item.message}\n只更新紀錄，不會再次送出。`
+        : `將 ${item.account} 列入黑名單？之後所有場次與商品重發都不會向此帳號送出。`;
+      if (!window.confirm(prompt)) return;
+      if (state.queue !== queue || state.running || state.importing) return;
+      try {
+        if (manual) {
+          const next = markManualSent(loadSentHistory(), item, queue.session, loadBlacklist());
+          GM_setValue(STORE.sent, next); state.sent = next;
+          const failures = removeFailedRecord(loadFailedHistory(), item);
+          GM_setValue(STORE.failed, failures); state.failed = failures;
+          addLog("MANUAL_SENT", item.account, "使用者核對本場完整明細，確認已人工補送；未執行送出");
+        } else {
+          saveBlacklist([...loadBlacklist(), item.account]);
+          addLog("BLACKLISTED", item.account, "使用者明確列入黑名單，不發送");
+        }
+        authorize.checked = resendAuthorize.checked = false;
+        renderQueue();
+        showRunStatus(`${item.account}：${manual ? "已人工補送" : "黑名單排除"}。只更新紀錄，沒有送出訊息。`, "success");
+      } catch (error) { refreshSentHistory(); showRunStatus(`紀錄更新未完成：${error.message}。請保留頁面核對。`, "error"); }
+    }
+    manualButton.addEventListener("click", () => resolveSelected(true));
+    blockedButton.addEventListener("click", () => resolveSelected(false));
     const importSelectedWorkbook = async () => {
       if (state.running) {
         showImportStatus("發送進行中，請先按緊急停止再更換 Excel。", "warn");
@@ -3101,6 +3487,9 @@
     async function runQueue(request = null) {
       if (state.running) return;
       refreshSentHistory();
+      try {
+        if (JSON.stringify(parseBlacklist(blacklistInput.value)) !== JSON.stringify(state.blacklist)) throw createAutomationError("BLACKLIST_UNSAVED", "黑名單尚未儲存或已在另一分頁變動，請先核對並儲存黑名單。");
+      } catch (error) { showRunStatus(error.message, "error"); return; }
       const isResend = request?.mode === "resend";
       const allItems = isResend
         ? request.items
@@ -3129,18 +3518,19 @@
         maxDelaySeconds: 25,
       };
       saveConfig(nextConfig);
+      const allowedItems = allItems.filter(item => !state.blacklist.includes(item.account));
       const unsent = isResend
-        ? allItems
-        : allItems.filter(
+        ? allowedItems
+        : allowedItems.filter(
             (item) =>
-              resolveQueueItemState(item, state.sent).sendByDefault,
+              resolveQueueItemState(item, state.sent, state.blacklist).sendByDefault,
           );
       const items =
         !isResend && nextConfig.testMode
           ? unsent.slice(0, nextConfig.testCount)
           : unsent;
       if (!items.length) {
-        showRunStatus("清單中的訊息都已發送，沒有重複發送。", "success");
+        showRunStatus("清單已完成或已列入黑名單，沒有可發送者。", "success");
         return;
       }
       const runCounts = {
@@ -3170,8 +3560,8 @@
             `處理 ${index + 1}/${items.length}：${item.account}`,
           );
           if (
-            !isResend &&
-            !resolveQueueItemState(item, state.sent).sendByDefault
+            state.blacklist.includes(item.account) || (!isResend &&
+            !resolveQueueItemState(item, state.sent, state.blacklist).sendByDefault)
           ) {
             addLog("SKIP", item.account, "已有成功紀錄，不重發");
             continue;
@@ -3235,7 +3625,7 @@
               "uncertain"
             ) {
               runCounts.uncertain += 1;
-            } else if (failureCategory(error.code) === "buyer_not_found") {
+            } else if (failureCategory(error.code) === "search_unconfirmed") {
               runCounts.buyerNotFound += 1;
             } else {
               runCounts.processFailed += 1;
@@ -3279,7 +3669,7 @@
       if (state.running) return;
       refreshSentHistory();
       const view = buildResendViewModel(
-        state.queue?.items || [],
+        (state.queue?.items || []).filter(item => !state.blacklist.includes(item.account)),
         state.sent,
         resendCodes.value,
         resendAuthorize.checked,
@@ -3323,11 +3713,12 @@
         state.queue?.items || [],
         state.sent,
         state.failed,
+        state.blacklist,
       );
       try {
         await copyTextToClipboard(buildUnsentCopyText(view));
         unsentActionStatus.className = "wl-status wl-success";
-        unsentActionStatus.textContent = `已複製 ${view.totalUnsent} 位未送出／待確認資料。`;
+        unsentActionStatus.textContent = `已複製 ${view.totalUnsent} 位未送出／待確認資料、${view.excluded.length} 位黑名單排除紀錄。`;
       } catch (error) {
         unsentActionStatus.className = "wl-status wl-error";
         unsentActionStatus.textContent = error.message || String(error);
@@ -3338,6 +3729,7 @@
         state.queue?.items || [],
         state.sent,
         state.failed,
+        state.blacklist,
       );
       downloadBlob(
         new Blob([buildUnsentCsv(view)], {
@@ -3346,7 +3738,7 @@
         buildUnsentCsvFilename(state.queue?.session),
       );
       unsentActionStatus.className = "wl-status wl-success";
-      unsentActionStatus.textContent = `已匯出 ${view.totalUnsent} 位；可行動分類在前，尚未嘗試排最後。`;
+      unsentActionStatus.textContent = `已匯出 ${view.totalUnsent} 位待處理、${view.excluded.length} 位黑名單排除紀錄；尚未嘗試排最後。`;
     });
     startButton.addEventListener("click", () => runQueue());
     resendCodes.addEventListener("input", () => {
@@ -3421,6 +3813,19 @@
   }
 
   const testApi = {
+    parseBlacklist,
+    markManualSent,
+    sendOneItem,
+    COMBO_PROMOTION_SCHEMA_VERSION,
+    parseComboProductCodes,
+    normalizeComboPromotions,
+    validateComboPromotions,
+    calculateComboPromotions,
+    preflightComboPromotions,
+    summarizeComboPromotions,
+    parseComboTableCells,
+    comboTableFromSheet,
+
     buyerValueDisplay,
     effectiveBuyerText,
     validateBuyerAccount,
