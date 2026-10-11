@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "publishedAt": "2026-10-11T14:43:27.101Z",
+  "publishedAt": "2026-10-11T14:47:12.944Z",
   "scripts": [
     {
       "id": "fb-inbox-finder",
@@ -46,11 +46,11 @@
       "id": "script-dd8913dd06efeda6f0e9",
       "name": "Shopee 帳號預檢",
       "namespace": "local.shopee.account-precheck",
-      "version": "0.1.0",
+      "version": "0.2.1",
       "file": "scripts/script-dd8913dd06efeda6f0e9.user.js",
-      "sha256": "7e476c354764190adb889ab724320b40940bb29c19d2dd7eabf3ffa2b88caed3",
-      "bytes": 48870,
-      "updatedAt": "2026-10-11T04:39:08.424Z"
+      "sha256": "cdb9e2c93d79276e564eaed01e22ff6441cbcca4662444935267dc3d359126e1",
+      "bytes": 55364,
+      "updatedAt": "2026-10-11T14:47:12.944Z"
     },
     {
       "id": "script-f44d30c00e62591c857f",
@@ -76,11 +76,11 @@
       "id": "shopee-live-order-capture",
       "name": "Shopee Live Order Capture",
       "namespace": "https://github.com/EthanTW1031/Shopee",
-      "version": "0.4.1",
+      "version": "0.5.0",
       "file": "scripts/shopee-live-order-capture.user.js",
-      "sha256": "614fb14cbb1a9613b71397096d7918b67257a1b65d9025edd1e834350fc9f476",
-      "bytes": 253186,
-      "updatedAt": "2026-10-09T02:54:32.470Z"
+      "sha256": "ce1495540dbd3e38d54ea584f19c2f424ef9f9f30536c61cb9914edb26ec5eaf",
+      "bytes": 258680,
+      "updatedAt": "2026-10-11T14:47:12.944Z"
     }
   ]
 }

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee Live Order Capture
 // @namespace    https://github.com/EthanTW1031/Shopee
-// @version      0.4.1
+// @version      0.5.0
 // @description  擷取蝦皮官方 PC 主播後台的直播留言並在本機整理喊單資料
 // @author       EthanTW1031
 // @match        https://live.shopee.tw/pc/live*
@@ -48,6 +48,122 @@
     OBSERVER: "observer"
   });
 
+  // src/shout-history.js
+  var SHOUT_HISTORY_LIMIT = 3e4;
+  var EMPTY_HISTORY_LENGTH = '{"v":1,"e":[]}'.length;
+  var DECIMAL_ID = /^[0-9]+$/u;
+  var EXCEL_WRAPPED_ID = /^="[\s\S]*"$/u;
+  var FORMULA_GUARDED_ID = /^'[\t\r\n ]*[=+\-@]/u;
+  function ordinalCompare(a, b) {
+    return a < b ? -1 : a > b ? 1 : 0;
+  }
+  function compareHistoryCommentIds(left, right) {
+    const a = String(left ?? "").trim();
+    const b = String(right ?? "").trim();
+    if (!a || !b) throw new Error("COMMENT_ID_MISSING");
+    if (EXCEL_WRAPPED_ID.test(a) || EXCEL_WRAPPED_ID.test(b)) {
+      throw new Error("COMMENT_ID_NOT_UNWRAPPED");
+    }
+    if (FORMULA_GUARDED_ID.test(a) || FORMULA_GUARDED_ID.test(b)) {
+      throw new Error("COMMENT_ID_FORMULA_GUARDED");
+    }
+    const ad = DECIMAL_ID.test(a), bd = DECIMAL_ID.test(b);
+    if (ad !== bd) return ad ? -1 : 1;
+    if (!ad) return ordinalCompare(a, b);
+    const an = a.replace(/^0+(?=[0-9])/u, "") || "0";
+    const bn = b.replace(/^0+(?=[0-9])/u, "") || "0";
+    return an.length - bn.length || ordinalCompare(an, bn);
+  }
+  function rawText(value, label) {
+    if (typeof value !== "string" || !value.trim()) {
+      throw new Error(`\u558A\u55AE\u6B77\u7A0B\u7F3A\u5C11\u6709\u6548\u7684${label}\uFF0C\u8ACB\u4FDD\u7559\u672C\u5834\u64F7\u53D6\u8CC7\u6599\u3002`);
+    }
+    return value;
+  }
+  function withItemContext(item, action) {
+    try {
+      return action();
+    } catch (error) {
+      if (!error.shoutHistoryContext) {
+        const display = (value) => {
+          try {
+            return String(value ?? "\uFF08\u7F3A\u5C11\uFF09");
+          } catch {
+            return "\uFF08\u7121\u6CD5\u986F\u793A\uFF09";
+          }
+        };
+        error.message += `\uFF08\u8CB7\u5BB6\u5E33\u865F\uFF1A${display(item?.username)}\uFF1B\u7559\u8A00 ID\uFF1A${display(item?.sourceCommentId)}\uFF1B\u9805\u76EE ID\uFF1A${display(item?.itemId)}\uFF09`;
+        error.shoutHistoryContext = true;
+      }
+      throw error;
+    }
+  }
+  function historyPosition(item) {
+    return withItemContext(item, () => {
+      const sequence = item?.captureSequence;
+      const segment = item?.segmentIndex ?? 0;
+      if (!Number.isSafeInteger(sequence) || sequence <= 0 || !Number.isSafeInteger(segment) || segment < 0) {
+        throw new Error("\u558A\u55AE\u6B77\u7A0B\u7684\u64F7\u53D6\u4F4D\u7F6E\u7121\u6548\uFF0C\u8ACB\u4FDD\u7559\u672C\u5834\u64F7\u53D6\u8CC7\u6599\u3002");
+      }
+      return [sequence, segment, rawText(item?.itemId, "\u9805\u76EE ID")];
+    });
+  }
+  function eventFromItem(item) {
+    const at = rawText(item?.capturedAt, "\u64F7\u53D6\u6642\u9593");
+    const time = Date.parse(at);
+    if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(at) || !Number.isSafeInteger(time) || new Date(time).toISOString() !== at) {
+      throw new Error("\u558A\u55AE\u6B77\u7A0B\u7684\u64F7\u53D6\u6642\u9593\u7121\u6548\uFF0C\u8ACB\u4FDD\u7559\u672C\u5834\u64F7\u53D6\u8CC7\u6599\u3002");
+    }
+    const id = rawText(item?.sourceCommentId, "\u7559\u8A00 ID");
+    const quantity = Number(item?.quantity);
+    if (!Number.isSafeInteger(quantity) || quantity < 1 || quantity > 99) {
+      throw new Error("\u558A\u55AE\u6B77\u7A0B\u7684\u6578\u91CF\u4E0D\u662F 1\uFF5E99 \u7684\u6574\u6578\u3002");
+    }
+    const position = historyPosition(item);
+    return { event: [at, id, quantity, String(item?.captureOrigin ?? ""), ...position], time };
+  }
+  function compareEvents(a, b) {
+    return a[4] - b[4] || a[5] - b[5] || ordinalCompare(a[6], b[6]);
+  }
+  function createShoutHistory() {
+    return { count: 0, jsonLength: EMPTY_HISTORY_LENGTH, events: [], max: null };
+  }
+  function addShoutHistory(history, item) {
+    return withItemContext(item, () => {
+      const { event, time } = eventFromItem(item);
+      const max = history.max;
+      if (!max || time > max.time || time === max.time && (compareHistoryCommentIds(event[1], max.event[1]) > 0 || compareHistoryCommentIds(event[1], max.event[1]) === 0 && compareEvents(event, max.event) > 0)) {
+        history.max = { event, time };
+      }
+      if (history.events !== null) {
+        const nextLength = history.jsonLength + JSON.stringify(event).length + (history.count ? 1 : 0);
+        history.jsonLength = nextLength;
+        if (nextLength > SHOUT_HISTORY_LIMIT) history.events = null;
+        else history.events.push(event);
+      }
+      history.count += 1;
+      return history;
+    });
+  }
+  function serializeShoutHistory(history, representative) {
+    if (!history?.count) {
+      history = addShoutHistory(createShoutHistory(), representative);
+    }
+    if (history.events === null) {
+      return JSON.stringify({
+        v: 1,
+        omitted: "too_long",
+        n: history.count,
+        p: historyPosition(representative),
+        max: [history.max.event[0], history.max.event[1]]
+      });
+    }
+    return JSON.stringify({ v: 1, e: history.events.slice().sort(compareEvents) });
+  }
+  function serializePendingPosition(item) {
+    return JSON.stringify({ v: 1, p: historyPosition(item) });
+  }
+
   // src/aggregation.js
   function buyerKey(item) {
     const uid = String(item?.uid ?? "").trim();
@@ -67,12 +183,13 @@
     const number = Number(value);
     return Number.isSafeInteger(number) ? number : fallback;
   }
-  function createOrderAggregation() {
+  function createOrderAggregation({ includeHistory = false } = {}) {
     return {
       orderLineCount: 0,
       reviewLineCount: 0,
       aggregatedUnitCount: 0,
-      groups: /* @__PURE__ */ new Map()
+      groups: /* @__PURE__ */ new Map(),
+      ...includeHistory ? { includeHistory: true } : {}
     };
   }
   function compareItemToGroupPosition(item, group) {
@@ -111,12 +228,14 @@
         representativeItemId: item.itemId,
         representativeCaptureSequence: item.captureSequence,
         representativeSegmentIndex: item.segmentIndex,
-        representativeActivationSequence: item.activationSequence
+        representativeActivationSequence: item.activationSequence,
+        ...aggregation.includeHistory ? { shoutHistory: addShoutHistory(createShoutHistory(), item) } : {}
       });
       aggregation.aggregatedUnitCount += quantity;
       return aggregation;
     }
     existing.sourceItemCount += 1;
+    if (aggregation.includeHistory) addShoutHistory(existing.shoutHistory, item);
     if (compareItemToGroupPosition(item, existing) > 0) {
       aggregation.aggregatedUnitCount += quantity - existing.latestQuantity;
       existing.latestQuantity = quantity;
@@ -2822,10 +2941,10 @@
     return CATALOG_HEADERS.every((value, index) => normalizeCell(fields[index], { preserveInternalWhitespace: true }) === value);
   }
   function parseCatalogTsv(text, options = {}) {
-    const rawText = String(text ?? "").replace(/^\uFEFF/u, "");
+    const rawText2 = String(text ?? "").replace(/^\uFEFF/u, "");
     const rows = [];
     const globalErrors = [];
-    if (codePointLength2(rawText) > (options.maxTextCodePoints ?? CATALOG_LIMITS.maxTextCodePoints)) {
+    if (codePointLength2(rawText2) > (options.maxTextCodePoints ?? CATALOG_LIMITS.maxTextCodePoints)) {
       globalErrors.push(issue(
         "catalogTextTooLong",
         "catalog",
@@ -2841,7 +2960,7 @@
         hasBlockingErrors: true
       };
     }
-    const nonEmptyLines = rawText.split(/\r?\n/u).map((line, index) => ({ line, sourceRow: index + 1 })).filter(({ line }) => line.trim() !== "");
+    const nonEmptyLines = rawText2.split(/\r?\n/u).map((line, index) => ({ line, sourceRow: index + 1 })).filter(({ line }) => line.trim() !== "");
     let dataLines = nonEmptyLines;
     if (nonEmptyLines.length) {
       const firstFields = nonEmptyLines[0].line.split("	");
@@ -2950,7 +3069,8 @@
     "\u5F85\u78BA\u8A8D",
     "\u4F86\u6E90",
     "\u558A\u55AE\u5247\u6578",
-    "\u5F59\u7E3D\u4EF6\u6578"
+    "\u5F59\u7E3D\u4EF6\u6578",
+    "\u558A\u55AE\u6B77\u7A0B"
   ];
   var CSV_COLUMN_INDEX = Object.freeze({
     SESSION_ID: ORDER_HEADERS.indexOf("\u76F4\u64ADSession"),
@@ -3016,7 +3136,8 @@
       item.needsReview ? "\u662F" : "\u5426",
       item.captureOrigin,
       confirmed ? aggregate.sourceItemCount ?? 1 : 1,
-      confirmed ? latestQuantity ?? "" : ""
+      confirmed ? latestQuantity ?? "" : "",
+      confirmed ? serializeShoutHistory(aggregate.shoutHistory, item) : serializePendingPosition(item)
     ];
   }
   function rowFromInactiveComment(comment) {
@@ -3037,6 +3158,7 @@
       "inactiveCode",
       "\u5426",
       comment.captureOrigin,
+      "",
       "",
       ""
     ];
@@ -3059,7 +3181,7 @@
     return [sessionId, last.captureSequence, last.itemId];
   }
   async function buildPagedAggregation(repository, sessionId, options) {
-    const aggregation = createOrderAggregation();
+    const aggregation = createOrderAggregation({ includeHistory: true });
     let afterKey = [sessionId, 0, ""];
     while (true) {
       const rows = await repository.readItemsPage(sessionId, {
