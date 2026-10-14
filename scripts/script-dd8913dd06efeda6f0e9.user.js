@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Shopee 帳號預檢
 // @namespace    local.shopee.account-precheck
-// @version      0.2.1
-// @description  預檢作業訊息、明確排除黑名單，分開匯出已確認發送與待處理直播 CSV
+// @version      0.3.1
+// @description  只搜尋帳號與封鎖旗標，不發訊息；無損分開匯出預檢通過與待處理 CSV
 // @match        https://seller.shopee.tw/new-webchat/conversations*
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -10,637 +10,1168 @@
 // @run-at       document-idle
 // ==/UserScript==
 
-/* global GM_getValue, GM_setValue, GM_registerMenuCommand, module */
-(function accountPrecheck() {
-  "use strict";
-  const VERSION = "0.2.1";
-  const STORE = Object.freeze({ config: "precheck:config:v1", records: "precheck:records:v1", files: "precheck:files:v1", blacklist: "precheck:blacklist:v1", panelPosition: "precheck:panel-position:v1" });
-  const DEFAULT_CONFIG = Object.freeze({ template: "此為采兒小鋪作業用訊息,請勿回覆" });
-  const HEADERS = Object.freeze(["擷取時間", "直播Session", "限定時段序號", "留言ID", "買家UID", "買家帳號", "原始留言", "正規化留言", "商品代號", "品名", "規格尺寸", "數量", "價格", "狀態", "待確認", "來源", "喊單則數", "彙總件數"]);
-  const LABELS = Object.freeze({ ready: "尚未發送", sent: "已送出", manualSent: "已人工送出", blocked: "黑名單排除", searchUnconfirmed: "搜尋未確認", notFound: "搜尋未確認（舊紀錄）", pending: "可能已送出", draft: "有草稿，沒發", failed: "失敗，可再試" });
-  const PANEL_SELECTOR = "[data-account-precheck],[data-settlement-notice],[data-winlist-shopee]";
-  const LOCK_NAME = "shopee-settlement-notice:send";
-  const CHAT_SELECTORS = Object.freeze({ searchInputs: ['input[placeholder="搜尋全部"]', 'input[placeholder*="搜尋"]'], composers: ['textarea[placeholder="輸入文字"]', 'textarea[placeholder*="輸入"]', '[contenteditable="true"][role="textbox"]'] });
-  const norm = value => String(value ?? "").normalize("NFKC").replace(/\uFEFF/gu, "").replace(/\s+/gu, " ").trim();
-  const multiline = value => String(value ?? "").replace(/\r\n?/gu, "\n").trim();
-  const escapeHtml = value => String(value ?? "").replace(/[&<>"']/gu, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch]);
-  function problem(code, message) { const error = new Error(message); error.code = code; return error; }
-  function renderMessage(config, account) {
-    const message = multiline(config.template).replace(/\{買家\}/gu, () => account);
-    if (!message || message.length > 2000) throw problem("TEMPLATE", "作業用訊息不可空白，請控制在 2000 字元以內。");
-    return message;
-  }
-  function validateConfig(input) { const config = { template: multiline(input?.template) }; renderMessage(config, "預覽帳號"); return config; }
-  function effectiveBuyerText(value) {
-    if (value == null) return { ok: true, text: "" };
-    if (typeof value === "string") return { ok: true, text: value };
-    if (typeof value !== "object" || Object.prototype.toString.call(value) === "[object Date]") return { ok: false, text: "" };
-    if (Object.hasOwn(value, "formula") || Object.hasOwn(value, "sharedFormula")) return { ok: typeof value.result === "string", text: typeof value.result === "string" ? value.result : "" };
-    if (typeof value.text === "string") return { ok: true, text: value.text };
-    if (Array.isArray(value.richText) && value.richText.every(part => typeof part?.text === "string")) return { ok: true, text: value.richText.map(part => part.text).join("") };
-    return { ok: false, text: "" };
-  }
-  function validateBuyerAccount(value) {
-    const extracted = effectiveBuyerText(value);
-    let text = extracted.text.trim();
-    const wrapped = text.match(/^="((?:[^"]|"")*)"$/u);
-    if (wrapped) text = wrapped[1].replace(/""/gu, '"');
-    text = norm(text);
-    const converted = /^(?:\d+-(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)(?:-\d{2})?|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)-\d{2}|\d+月\d+日|\d{4}\/\d{1,2}\/\d{1,2}|[+-]?\d+(?:\.\d+)?E[+-]\d+|\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})|TRUE|FALSE|#NAME\?|#VALUE!|#REF!|#DIV\/0!|#N\/A|#NUM!|#NULL!)$/u.test(text);
-    return { ok: extracted.ok && !converted, text };
-  }
-  function parseBlacklist(value) {
-    const lines = Array.isArray(value) ? value : String(value ?? "").split(/\r?\n/u);
-    const accounts = lines.map(line => validateBuyerAccount(line));
-    if (accounts.some(account => !account.ok || /\s/u.test(account.text))) throw problem("BLACKLIST", "黑名單請每行填一個完整買家帳號，不可使用日期、科學記號或含空白的帳號。");
-    return [...new Set(accounts.map(account => account.text).filter(Boolean))];
-  }
-  function itemState(queue, records, item) {
-    return queue.blacklist?.includes(item.account) ? "blocked" : recordState(records, queue.batchId, item.account);
-  }
+// Isolated candidate; Ethan authorized implementation on 2026-10-14.
+// Requirements v0.7. No production backfill/publication in this stage.
 
-  // 切欄與控貨助手 parseCsv 相同，額外保留每筆原文與空白筆，供無損刪列。
-  function splitCsv(text) {
-    const source = String(text).replace(/^\uFEFF/u, ""), records = [];
-    let fields = [], field = "", quoted = false, start = 0;
-    function push(end, ending = "") { fields.push(field.replace(/\r$/u, "")); records.push({ raw: source.slice(start, end), ending, fields, row: records.length + 1 }); fields = []; field = ""; }
-    for (let i = 0; i < source.length; i++) {
-      const ch = source[i];
-      if (quoted) {
-        if (ch === '"' && source[i + 1] === '"') { field += '"'; i++; }
-        else if (ch === '"') quoted = false;
-        else field += ch;
-      } else if (ch === '"') quoted = true;
-      else if (ch === ",") { fields.push(field); field = ""; }
-      else if (ch === "\n") { const end = i > start && source[i - 1] === "\r" ? i - 1 : i; push(end, source.slice(end, i + 1)); start = i + 1; }
-      else field += ch;
-    }
-    if (quoted) throw problem("CSV_QUOTE", "直播 CSV 有未閉合的雙引號，請使用抓單匯出的原檔。");
-    if (start < source.length) push(source.length);
-    return records;
-  }
-  const blankRecord = record => !record.fields.some(cell => String(cell).trim());
-  function parseSource(buffer, filename) {
-    if (!/\.csv$/iu.test(filename) || filename.startsWith("~$")) throw problem("FILE", "請選擇 .csv 直播原始檔，勿選 Excel 暫存鎖定檔。");
-    const bytes = buffer instanceof Uint8Array ? new Uint8Array(buffer) : new Uint8Array(buffer);
-    let text;
-    try { text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes); }
-    catch { throw problem("UTF8", "檔案不是合法的 UTF-8，可能被 Excel 另存過，請用抓單匯出的原檔。"); }
-    const records = splitCsv(text);
-    if (!records.length) throw problem("EMPTY", "檔案是空的，請選擇抓單匯出的原檔。");
-    const actual = records[0].fields.map(value => value.trim());
-    if (![HEADERS.length, HEADERS.length + 1].includes(actual.length) ||
-        HEADERS.some((value, i) => actual[i] !== value) ||
-        (actual.length === HEADERS.length + 1 && actual.at(-1) !== "喊單歷程")) throw problem("HEADERS", `表頭必須是直播固定 18 欄，或在其後加第 19 欄「喊單歷程」，且順序相同。實際表頭：${actual.join("｜") || "（空白）"}`);
-    let sourceRows = 0, inactiveRows = 0, emptyAccountRows = 0;
-    const active = new Set(), rowCounts = new Map(), issues = [];
-    for (const record of records.slice(1)) {
-      if (blankRecord(record)) continue;
-      sourceRows++;
-      if (record.fields.length !== actual.length) throw problem("WIDTH", `第 ${record.row} 列不是 ${actual.length} 格（實際 ${record.fields.length} 格），整份未匯入。`);
-      const account = validateBuyerAccount(record.fields[5]);
-      if (!account.ok) issues.push(`第 ${record.row} 列：帳號疑似被 Excel 轉型，請核對抓單匯出的原檔。`);
-      record.account = account.text;
-      if (account.text) rowCounts.set(account.text, (rowCounts.get(account.text) || 0) + 1);
-      const inactive = record.fields[13].trim() === "inactiveCode";
-      if (inactive) inactiveRows++;
-      if (!account.text) emptyAccountRows++;
-      if (!inactive && account.text) active.add(account.text);
-    }
-    if (issues.length) throw problem("ACCOUNT", issues.join("\n"));
-    if (!sourceRows) throw problem("EMPTY", "檔案只有表頭，沒有資料列，整份未匯入。");
-    const accounts = [...active].sort((a, b) => a.localeCompare(b, "zh-Hant", { numeric: true }));
-    return { name: filename, bytes, text, records, accounts, rowCounts, sourceRows, inactiveRows, emptyAccountRows, bom: text.startsWith("\uFEFF"), newline: /\r?\n/u.exec(text)?.[0] || "\n", trailing: text.endsWith("\n") };
-  }
-  async function readSource(buffer, filename) {
-    const entry = parseSource(buffer, filename);
-    const hash = await crypto.subtle.digest("SHA-256", entry.bytes);
-    entry.hash = [...new Uint8Array(hash)].map(byte => byte.toString(16).padStart(2, "0")).join("");
-    return entry;
-  }
-  function batchId(hash, round) { return `precheck:${hash}:${round}`; }
-  function recordKey(scope, account) { return JSON.stringify([scope, account]); }
-  function recordState(records, scope, account) { return records[recordKey(scope, account)]?.status || "ready"; }
-  function buildQueue(entry, input, round = 0, blacklist = []) {
-    const config = validateConfig(input);
-    return { batchId: batchId(entry.hash, round), blacklist: parseBlacklist(blacklist), items: entry.accounts.map(account => ({ account, message: renderMessage(config, account), rowCount: entry.rowCounts.get(account) || 0 })) };
-  }
-  function runnableItems(queue, records) { return queue.items.filter(item => ["ready", "failed"].includes(itemState(queue, records, item))); }
-  function countsFor(queue, records) {
-    const counts = Object.fromEntries(Object.keys(LABELS).map(key => [key, 0]));
-    for (const item of queue.items) counts[itemState(queue, records, item)]++;
-    return counts;
-  }
-  function streakWarning(queue, records) {
-    let count = 0, maximum = 0;
-    for (const item of queue.items) { count = ["notFound", "searchUnconfirmed"].includes(itemState(queue, records, item)) ? count + 1 : 0; maximum = Math.max(maximum, count); }
-    return maximum >= 3 ? `有 ${maximum} 位連續搜尋未確認，請先確認網路與搜尋畫面，再手動重查。` : "";
-  }
-  function pruneFiles(files, records, entry) {
-    const prior = files.entries.find(file => file.hash === entry.hash);
-    const updated = { hash: entry.hash, round: prior?.round || 0, name: entry.name, usedAt: new Date().toISOString() };
-    const entries = [updated, ...files.entries.filter(file => file.hash !== entry.hash)].slice(0, 20);
-    const retained = new Set(entries.map(file => file.hash)), nextRecords = {};
-    for (const [key, record] of Object.entries(records)) {
-      const hash = /^precheck:([a-f0-9]{64}):\d+$/u.exec(record.batchId)?.[1];
-      if (retained.has(hash)) nextRecords[key] = record;
-    }
-    return { files: { ...files, entries }, records: nextRecords, round: updated.round };
-  }
-  function toCsv(rows) {
-    return "\uFEFF" + rows.map((row, rowIndex) => row.map((value, colIndex) => {
-      let text = String(value ?? "");
-      // 帳號用固定文字公式保存，Excel 開啟 CSV 時不會吞掉前導零。
-      // 公式只有跳脫過的字串常數，帳號內的等號等字元不會被當成運算。
-      if (rowIndex > 0 && colIndex === 0) text = `="${text.replace(/"/gu, '""')}"`;
-      else if (/^[=+@\-\t\r]/u.test(text)) text = `'${text}`;
-      return `"${text.replace(/"/gu, '""')}"`;
-    }).join(",")).join("\r\n");
-  }
-  function listCsv(queue, records) {
-    const priority = { blocked: 0, notFound: 1, searchUnconfirmed: 1, pending: 1, draft: 1, failed: 1, ready: 1, sent: 2, manualSent: 2 };
-    const items = [...queue.items].sort((a, b) => priority[itemState(queue, records, a)] - priority[itemState(queue, records, b)]);
-    return toCsv([["買家帳號", "這位在檔裡有幾列", "狀態", "說明", "時間"], ...items.map(item => {
-      const record = records[recordKey(queue.batchId, item.account)];
-      return [item.account, item.rowCount, LABELS[itemState(queue, records, item)], itemState(queue, records, item) === "blocked" ? "使用者明確列入黑名單，不發送、不納入叫貨檔" : record?.detail || "", record?.time || ""];
-    })]);
-  }
-  function exportPartition(entry, queue, records, pendingOnly = false) {
-    const counts = countsFor(queue, records), blocked = new Set([...(queue.blacklist || []), ...queue.items.filter(item => itemState(queue, records, item) === "blocked").map(item => item.account)]);
-    const accepted = new Set(queue.items.filter(item => ["sent", "manualSent"].includes(itemState(queue, records, item))).map(item => item.account));
-    if (!queue.items.length) throw problem("QUEUE", "檔案沒有可預檢的買家，請核對原檔。");
-    const select = record => !blocked.has(record.account) && (pendingOnly ? !accepted.has(record.account) : accepted.has(record.account));
-    const kept = entry.records.filter((record, index) => index === 0 || blankRecord(record) || select(record));
-    if (!kept.slice(1).some(record => !blankRecord(record))) throw problem(pendingOnly ? "NO_PENDING" : "NO_CONFIRMED", pendingOnly ? "沒有待處理資料。" : "沒有已確認發送成功的買家，不能產生叫貨用直播檔；請先處理待處理名單。");
-    const removedRows = entry.records.length - kept.length;
-    const text = removedRows ? (entry.bom ? "\uFEFF" : "") + kept.map(record => record.raw + record.ending).join("") : entry.text;
-    const check = splitCsv(text);
-    if (check.length !== kept.length || check.some((record, i) => record.raw !== kept[i].raw || (i > 0 && !blankRecord(record) && !select({ account: validateBuyerAccount(record.fields[5]).text })))) throw problem("EXPORT_CHECK", "匯出自我檢查未通過，沒有下載，請保留原檔並重新核對。");
-    const pendingCount = queue.items.length - accepted.size - counts.blocked;
-    const blockedRows = entry.records.filter(record => blocked.has(record.account)).length;
-    const messages = [pendingOnly ? "這是待處理直播檔，尚未確認可發送，請勿拿來叫貨。" : "只匯出已確認發送成功的買家，供控貨助手建立新場次。",
-      `已確認：${accepted.size} 位（自動 ${counts.sent}、人工 ${counts.manualSent}）。`, `待處理：${pendingCount} 位；黑名單排除：${counts.blocked} 位、${blockedRows} 列。`,
-      `此檔保留 ${kept.slice(1).filter(record => !blankRecord(record)).length} 列；原檔不修改。`];
-    if (!pendingOnly && pendingCount) messages.push("未確認者沒有放進這份檔；可另外匯出待處理直播檔，處理成功後重新匯出並建立新場次。");
-    const warning = streakWarning(queue, records); if (warning) messages.push(warning);
-    messages.push("確定匯出？");
-    return { text, bytes: removedRows ? new TextEncoder().encode(text) : entry.bytes, confirmation: messages.join("\n"), filename: entry.name.replace(/\.csv$/iu, "") + (pendingOnly ? "_待處理.csv" : "_僅已確認發送.csv"), removedRows };
-  }
-  function filteredExport(entry, queue, records) { return exportPartition(entry, queue, records); }
-  function pendingExport(entry, queue, records) { return exportPartition(entry, queue, records, true); }
-  function visible(element) {
-    if (!element?.isConnected) return false;
-    const style = getComputedStyle(element), rect = element.getBoundingClientRect();
-    return style.display !== "none" && style.visibility !== "hidden" && Number(style.opacity) !== 0 && rect.width > 0 && rect.height > 0;
-  }
-  function firstVisible(selectors) {
-    for (const selector of selectors) { const element = [...document.querySelectorAll(selector)].find(element => visible(element) && !element.closest(PANEL_SELECTOR)); if (element) return element; }
-    return null;
-  }
-  function detectSecurityChallenge() {
-    if (['iframe[src*="captcha" i]', 'iframe[src*="challenge" i]', 'iframe[title*="captcha" i]', '[class*="captcha" i]', '[id*="captcha" i]'].some(selector => [...document.querySelectorAll(selector)].some(element => visible(element) && !element.closest(PANEL_SELECTOR)))) return true;
-    return [...document.querySelectorAll('[role="dialog"], [class*="modal" i]')].filter(element => visible(element) && !element.closest(PANEL_SELECTOR)).some(element => /拼圖驗證|完成拼圖|安全驗證|請驗證|captcha|security challenge/iu.test(norm(element.textContent)));
-  }
-  function assertSafe(stopRequested) {
-    if (stopRequested?.()) throw problem("STOP", "已停止。");
-    if (navigator.onLine === false) throw problem("SEARCH_UNRELIABLE", "電腦目前沒有網路，已停止。網路恢復後按開始，會從這一位接著跑。");
-    if (detectSecurityChallenge()) throw problem("SECURITY_CHALLENGE", "偵測到拼圖／安全驗證，已停止，請人工處理。");
-    const otherStop = document.querySelector('[data-winlist-shopee="1"]')?.shadowRoot?.querySelector("[data-stop]");
-    if (otherStop && !otherStop.classList.contains("wl-hidden") && visible(otherStop)) throw problem("OTHER_SENDER", "明細腳本正在發送，請先停止明細發送再執行帳號預檢。");
-  }
-  async function waitFor(predicate, timeoutMs, stopRequested) {
-    const deadline = Date.now() + timeoutMs;
-    do { assertSafe(stopRequested); const result = predicate(); if (result) return result; await new Promise(resolve => setTimeout(resolve, 200)); } while (Date.now() < deadline);
-    assertSafe(stopRequested);
-    return null;
-  }
-  function setNativeValue(element, value) {
-    const prototype = element instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-    const setter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
-    if (setter) setter.call(element, value); else element.value = value;
-    element.dispatchEvent(new Event("input", { bubbles: true })); element.dispatchEvent(new Event("change", { bubbles: true }));
-  }
-  function composerText(composer) { return composer instanceof HTMLTextAreaElement ? composer.value : composer.textContent; }
-  function setComposer(composer, text) {
-    if (composer instanceof HTMLTextAreaElement) setNativeValue(composer, text);
-    else { composer.textContent = text; composer.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: text })); }
-  }
-  function activateElement(element, horizontalRatio = 0.5) {
-    element.scrollIntoView({ block: "nearest", inline: "nearest" });
-    const rect = element.getBoundingClientRect();
-    const clientX =
-      rect.left +
-      rect.width * Math.min(0.9, Math.max(0.1, horizontalRatio));
-    const clientY = rect.top + rect.height / 2;
-    const topElement = document.elementFromPoint(clientX, clientY);
-    const target =
-      topElement &&
-      (element.contains(topElement) || topElement.contains(element))
-        ? topElement
-        : element;
-    // 重要修正（v1.1.4）：不要傳 view。
-    // Tampermonkey 沙箱裡的 window 是包裝物件，無法被轉成 UIEventInit.view 要求的
-    // 真正 Window，會讓 PointerEvent/MouseEvent 建構子在第一步就拋
-    // "Failed to construct 'PointerEvent': ... Failed to convert value to 'Window'"，
-    // 導致整個點擊完全沒發生（搜尋得到卻點不進買家）。一般點擊不需要 view。
-    // MouseEvent 與 PointerEvent 各自用不含 view 的 init，欄位分開避免互相污染。
-    const mouseInit = {
-      bubbles: true,
-      cancelable: true,
-      composed: true,
-      clientX,
-      clientY,
-      button: 0,
-      buttons: 1,
-      detail: 1,
-    };
-    const pointerInit = {
-      ...mouseInit,
-      pointerId: 1,
-      pointerType: "mouse",
-      isPrimary: true,
-      width: 1,
-      height: 1,
-      pressure: 0.5,
-    };
-    if (typeof target.focus === "function") target.focus();
-    const PointerCtor =
-      typeof PointerEvent === "function" ? PointerEvent : MouseEvent;
-    target.dispatchEvent(new PointerCtor("pointerover", pointerInit));
-    target.dispatchEvent(new MouseEvent("mouseover", mouseInit));
-    target.dispatchEvent(new PointerCtor("pointerdown", pointerInit));
-    target.dispatchEvent(new MouseEvent("mousedown", mouseInit));
-    target.dispatchEvent(new PointerCtor("pointerup", { ...pointerInit, buttons: 0 }));
-    target.dispatchEvent(new MouseEvent("mouseup", { ...mouseInit, buttons: 0 }));
-    target.dispatchEvent(new MouseEvent("click", { ...mouseInit, buttons: 0 }));
-  }
-
-  function exactSearchResult(account, input) {
-    const inputRect = input.getBoundingClientRect();
-    return [...document.querySelectorAll("div,li,span,p")].filter(element => visible(element) && norm(element.textContent) === account && !element.closest(PANEL_SELECTOR)).map(label => {
-      let row = label;
-      while (row.parentElement) { const rect = row.getBoundingClientRect(); if (rect.width >= 180 && rect.height >= 32 && rect.height <= 100) break; row = row.parentElement; }
-      return { row, label };
-    }).filter(({ row }) => {
-      const rect = row.getBoundingClientRect();
-      return norm(row.textContent) === account && rect.left <= inputRect.right + 80 && rect.right >= inputRect.left - 30 && rect.top >= inputRect.bottom - 10 && rect.height >= 32 && rect.height <= 100;
-    }).sort((a, b) => a.label.getBoundingClientRect().width * a.label.getBoundingClientRect().height - b.label.getBoundingClientRect().width * b.label.getBoundingClientRect().height)[0] || null;
-  }
-  function exactConversationHeader(account, input) {
-    const inputRect = input.getBoundingClientRect();
-    return [...document.querySelectorAll("div,span,p,h1,h2,h3")].find(element => visible(element) && !element.closest(PANEL_SELECTOR) && norm(element.textContent) === account && element.getBoundingClientRect().left > inputRect.right + 30 && element.getBoundingClientRect().top < 320) || null;
-  }
-  function findSendButton(composer) {
-    const box = composer.getBoundingClientRect();
-    const candidates = [...document.querySelectorAll('button:not([disabled]),[role="button"]:not([aria-disabled="true"]),[aria-label*="send" i],[aria-label*="送出"],[aria-label*="發送"],[title*="send" i],[title*="送出"],[title*="發送"],[class*="send" i],[data-testid*="send" i],svg.chat-icon,svg')]
-      .map(element => element.closest('button,[role="button"],[tabindex]:not([tabindex="-1"])') || element)
-      .filter((element, index, items) => items.indexOf(element) === index && visible(element) && !element.closest(PANEL_SELECTOR) && !element.hasAttribute("disabled") && element.getAttribute("aria-disabled") !== "true")
-      .map(element => {
-        const rect = element.getBoundingClientRect();
-        if (rect.width < 12 || rect.height < 12 || rect.width > 120 || rect.height > 120 || rect.right < box.right - 150 || rect.left > box.right + 50 || rect.bottom < box.top - 25 || rect.top > box.bottom + 45) return null;
-        const metadata = ["aria-label", "title", "data-testid", "class"].map(name => element.getAttribute(name)).join(" ") + element.id;
-        const text = norm(element.textContent);
-        let score = 300 - Math.abs(rect.right - box.right) - Math.abs(rect.bottom - box.bottom);
-        if (/send|submit|送出|發送/iu.test(metadata)) score += 500;
-        if (/send|submit|送出|發送/iu.test(text)) score += 300;
-        if (element.tagName === "BUTTON") score += 60;
-        if (text && !/send|submit|送出|發送/iu.test(text)) score -= 120;
-        return { element, score };
-      }).filter(Boolean).sort((a, b) => b.score - a.score);
-    return candidates[0]?.element || null;
-  }
-  function searchKey(element, key, keyCode) {
-    for (const type of ["keydown", "keypress", "keyup"]) {
-      const event = new KeyboardEvent(type, { key, code: key, bubbles: true, cancelable: true, composed: true });
-      Object.defineProperty(event, "keyCode", { get: () => keyCode }); Object.defineProperty(event, "which", { get: () => keyCode }); element.dispatchEvent(event);
-    }
-  }
-  async function sendOne(item, { dryRun, stopRequested, beforeClick, onClick }) {
-    let composer = null, clicked = false, input = null, filled = false;
+(() => {
+  var __create = Object.create;
+  var __defProp = Object.defineProperty;
+  var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
+  var __getOwnPropNames = Object.getOwnPropertyNames;
+  var __getProtoOf = Object.getPrototypeOf;
+  var __hasOwnProp = Object.prototype.hasOwnProperty;
+  var __commonJS = (cb, mod) => function __require() {
     try {
-      input = await waitFor(() => firstVisible(CHAT_SELECTORS.searchInputs), 10000, stopRequested);
-      if (!input) throw problem("SEARCH_INPUT", "找不到搜尋框。");
-      input.focus(); setNativeValue(input, ""); setNativeValue(input, item.account);
-      const result = await waitFor(() => exactSearchResult(item.account, input), 20000, stopRequested);
-      if (!result) {
-        assertSafe(stopRequested);
-        if (!visible(input) || !document.contains(input) || norm(input.value) !== item.account) throw problem("SEARCH_UNRELIABLE", "搜尋框不見了或搜尋文字變了，已停止。這一位還沒查，請確認畫面正常後按開始。");
-        throw problem("SEARCH_UNCONFIRMED", "20 秒內未辨識到完全相同的搜尋結果，搜尋未確認，未送出；可人工核對後手動重查。");
-      }
-      assertSafe(stopRequested); activateElement(result.label);
-      let verified = await waitFor(() => exactConversationHeader(item.account, input), 2500, stopRequested);
-      if (!verified) { assertSafe(stopRequested); activateElement(result.row, 0.2); verified = await waitFor(() => exactConversationHeader(item.account, input), 2500, stopRequested); }
-      if (!verified) { input.focus(); searchKey(input, "ArrowDown", 40); searchKey(input, "Enter", 13); verified = await waitFor(() => exactConversationHeader(item.account, input), 3000, stopRequested); }
-      if (!verified) throw problem("HEADER", "右側對話帳號無法核對，未送出。");
-      composer = await waitFor(() => firstVisible(CHAT_SELECTORS.composers), 8000, stopRequested);
-      if (!composer) throw problem("COMPOSER", "找不到訊息輸入框，未送出。");
-      if (multiline(composerText(composer))) throw problem("DRAFT", "買家對話已有草稿，帳號找得到；保留草稿，這位沒發。");
-      if (dryRun) return;
-      assertSafe(stopRequested);
-      if (!exactConversationHeader(item.account, input)) throw problem("HEADER", "對話帳號已變動，未送出。");
-      composer.focus(); setComposer(composer, item.message); filled = true;
-      const button = await waitFor(() => findSendButton(composer), 5000, stopRequested);
-      if (!button) throw problem("SEND_BUTTON", "找不到送出按鈕，未送出。");
-      assertSafe(stopRequested);
-      if (!exactConversationHeader(item.account, input) || !document.contains(composer) || multiline(composerText(composer)) !== multiline(item.message)) throw problem("CHAT_CHANGED", "對話或通知內容已變動，未送出。");
-      // 在送出前持久保存 pending。即使關頁／斷線，重新匯入也不會自動重發。
-      beforeClick();
-      assertSafe(stopRequested);
-      clicked = true; onClick?.(); activateElement(button);
-      const cleared = await waitFor(() => document.contains(composer) && exactConversationHeader(item.account, input) && composerText(composer) === "", 7000, stopRequested);
-      if (!cleared) throw problem("SEND_UNCERTAIN", "已點送出但未確認輸入框清空，請人工查看聊聊，暫停自動重試。");
-    } finally {
-      // 只清除本腳本填入、尚未點送出的文字；不動原草稿或可能已送出的對話。
-      if (!clicked && filled && composer && document.contains(composer) && input && exactConversationHeader(item.account, input) && multiline(composerText(composer)) === multiline(item.message)) setComposer(composer, "");
+      return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;
+    } catch (e) {
+      throw mod = 0, e;
     }
-  }
-  function download(content, filename, type) {
-    const url = URL.createObjectURL(new Blob([content], { type })), anchor = document.createElement("a");
-    anchor.href = url; anchor.download = filename; document.body.append(anchor); anchor.click(); anchor.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000);
-  }
-  function init() {
-    if (document.querySelector("[data-account-precheck]")) return;
-    const host = document.createElement("div"); host.setAttribute("data-account-precheck", "1"); document.body.append(host);
-    const root = host.attachShadow({ mode: "open" });
-    const state = { entry: null, queue: null, round: 0, running: false, importing: false, stop: false, logs: [], configValid: true, blacklist: [] };
-    try { state.blacklist = parseBlacklist(GM_getValue(STORE.blacklist, [])); }
-    catch (error) { host.remove(); throw error; }
-    let config;
-    const savedConfig = GM_getValue(STORE.config, DEFAULT_CONFIG);
-    try { config = validateConfig(savedConfig); }
-    catch { config = { template: typeof savedConfig?.template === "string" ? savedConfig.template : "" }; state.configValid = false; }
-    root.innerHTML = `<style>
-      :host{all:initial;font:14px/1.5 "Microsoft JhengHei",sans-serif;color:#253047}*{box-sizing:border-box}
-      .panel{position:fixed;left:18px;top:18px;width:440px;max-width:calc(100vw - 36px);max-height:88vh;background:#fff;border:1px solid #cbd5e1;border-radius:12px;box-shadow:0 8px 32px #0003;z-index:2147483646;overflow:hidden}
-      header{padding:10px 14px;background:#116466;color:white;display:flex;justify-content:space-between;align-items:center;cursor:grab;user-select:none;touch-action:none}.dragging header{cursor:grabbing}header button{background:#ffffff25;color:white;border:0}
-      .body{padding:14px;max-height:calc(88vh - 48px);overflow:auto}.closed .body,.hidden{display:none}h3{font-size:15px;margin:8px 0}p{margin:8px 0}.mini{font-size:12px;color:#566277}
-      label{display:block;margin:8px 0}input,textarea,select,button{font:inherit}textarea,select{width:100%;padding:7px;border:1px solid #b8c2d1;border-radius:6px;background:white;color:#253047}textarea{resize:vertical;min-height:90px}
-      .actions{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}button{padding:7px 10px;border:1px solid #b8c2d1;border-radius:6px;background:#f6f7fa;cursor:pointer}button.primary{background:#116466;color:white}button.danger{background:#b91c1c;color:white}button:disabled{opacity:.5;cursor:default}
-      .check{display:flex;gap:8px;align-items:start}.check input{margin-top:5px}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f1f8f7;padding:10px;border-radius:6px;margin:8px 0}.status,.file{white-space:pre-wrap;overflow-wrap:anywhere}.error{color:#b91c1c}.warning{color:#9a3412}.log{font-size:12px;max-height:140px;overflow:auto}.stop{position:sticky;bottom:0;width:100%;margin-top:8px}
-    </style><section class="panel"><header><strong>帳號預檢 v${VERSION}</strong><button data-collapse>收合</button></header><div class="body">
-      <h3>1. 作業用訊息</h3><label>訊息文字<textarea data-config="template"></textarea></label><p class="mini">可用 {買家} 代入帳號。修改後會保存，請重新核對並勾授權。</p>
-      <details><summary>黑名單（不發送、不納入叫貨檔）</summary><label>每行一個完整帳號<textarea data-blacklist></textarea></label><button data-save-blacklist>儲存黑名單</button><p class="mini">只以此名單判定黑名單；缺少輸入框不會自動判成黑名單。修改後需按儲存才生效。名單僅存於本腳本。</p><p data-blacklist-status></p></details>
-      <h3>2. 匯入直播原始檔</h3><input data-files type="file" accept=".csv"><p class="mini">一次一份抓單匯出的原始 CSV。沒喊單的留言和沒有帳號的列不發訊息。</p><p data-resume class="status"></p><div data-file-list class="file"></div><p data-summary class="status"></p>
-      <h3>3. 買家預覽</h3><select data-preview-select></select><p data-source class="mini"></p><pre data-preview>請先匯入直播原始檔。</pre><div class="actions"><button data-mark-manual>這位作業訊息已人工送出</button><button data-mark-blocked>這位列入黑名單</button></div>
-      <h3>4. 核對後啟動</h3><label class="check"><input data-dry type="checkbox" checked><span>演練：只搜尋前 3 位尚未發送的買家，不填訊息、不送出。</span></label><p class="mini">正式發送每位間隔 15～25 秒。請留在此分頁，電腦不要睡眠，預檢時不要開始發明細。</p>
-      <label class="check"><input data-authorize type="checkbox"><span>我已核對買家帳號與完整訊息，授權本次操作。</span></label><button data-start class="primary">開始演練</button><p data-status class="status"></p><button data-stop class="danger stop hidden">緊急停止</button>
-      <h3>5. 匯出與處理</h3><div class="actions"><button data-export-filtered>匯出僅已確認發送的直播檔</button><button data-export-pending>匯出待處理直播檔</button><button data-export-list>匯出名單與結果</button></div><div data-not-found class="hidden"><p>目前搜尋未確認的帳號：</p><pre data-not-found-list></pre><button data-recheck>搜尋未確認的重新查一次</button></div><p class="mini">待處理檔不能拿來叫貨。處理成功後須重新匯出，並用新檔建立新場次。</p><p data-streak class="warning"></p>
-      <details><summary>這份檔重新全部發一次</summary><p class="mini">已發過的人會再收到一次，請確認有需要才按。</p><button data-new-round>這份檔重新全部發一次</button></details><h3>紀錄</h3><pre data-log class="log"></pre>
-    </div></section>`;
-    const $ = selector => root.querySelector(selector), panel = $(".panel"), header = $("header");
-    const savedPosition = GM_getValue(STORE.panelPosition, null);
-    let drag = null;
-    function placePanel(left, top) {
-      const rect = panel.getBoundingClientRect();
-      panel.style.left = `${Math.min(Math.max(8, left), Math.max(8, window.innerWidth - rect.width - 8))}px`;
-      panel.style.top = `${Math.min(Math.max(8, top), Math.max(8, window.innerHeight - rect.height - 8))}px`;
-      panel.style.right = "auto"; panel.style.bottom = "auto";
+  };
+  var __copyProps = (to, from, except, desc) => {
+    if (from && typeof from === "object" || typeof from === "function") {
+      for (let key of __getOwnPropNames(from))
+        if (!__hasOwnProp.call(to, key) && key !== except)
+          __defProp(to, key, { get: () => from[key], enumerable: !(desc = __getOwnPropDesc(from, key)) || desc.enumerable });
     }
-    function savePanelPosition() {
-      const rect = panel.getBoundingClientRect();
-      GM_setValue(STORE.panelPosition, { left: Math.round(rect.left), top: Math.round(rect.top) });
-    }
-    function keepPanelInView() {
-      if (!panel.style.top) return;
-      const rect = panel.getBoundingClientRect(); placePanel(rect.left, rect.top);
-    }
-    requestAnimationFrame(() => {
-      const rect = panel.getBoundingClientRect();
-      placePanel(Number.isFinite(savedPosition?.left) ? savedPosition.left : rect.left, Number.isFinite(savedPosition?.top) ? savedPosition.top : rect.top);
-    });
-    header.addEventListener("pointerdown", event => {
-      if (event.button !== 0 || event.target.closest("button")) return;
-      const rect = panel.getBoundingClientRect();
-      drag = { id: event.pointerId, offsetX: event.clientX - rect.left, offsetY: event.clientY - rect.top };
-      header.setPointerCapture(event.pointerId); panel.classList.add("dragging"); event.preventDefault();
-    });
-    header.addEventListener("pointermove", event => {
-      if (drag?.id === event.pointerId) placePanel(event.clientX - drag.offsetX, event.clientY - drag.offsetY);
-    });
-    function finishDrag(event) {
-      if (!drag || (event?.pointerId != null && drag.id !== event.pointerId)) return;
-      const id = drag.id; drag = null; panel.classList.remove("dragging"); savePanelPosition();
-      if (header.hasPointerCapture(id)) header.releasePointerCapture(id);
-    }
-    header.addEventListener("pointerup", finishDrag);
-    header.addEventListener("pointercancel", finishDrag);
-    header.addEventListener("lostpointercapture", finishDrag);
-    window.addEventListener("blur", () => finishDrag());
-    window.addEventListener("resize", () => { keepPanelInView(); savePanelPosition(); });
-    if (typeof ResizeObserver === "function") new ResizeObserver(keepPanelInView).observe(panel);
-    const showStatus = (message, error = false) => { $("[data-status]").textContent = message; $("[data-status]").className = `status ${error ? "error" : ""}`; };
-    const log = message => { state.logs.push(`${new Date().toLocaleTimeString("zh-TW", { timeZone: "Asia/Taipei" })} ${message}`); state.logs = state.logs.slice(-300); $("[data-log]").textContent = state.logs.join("\n"); $("[data-log]").scrollTop = $("[data-log]").scrollHeight; };
-    function readRecords() {
-      const records = GM_getValue(STORE.records, {});
-      if (!records || typeof records !== "object" || Array.isArray(records) || Object.entries(records).some(([key, record]) => !record || !Object.hasOwn(LABELS, record.status) || record.status === "ready" || key !== recordKey(record.batchId, record.account))) throw problem("RECORDS", "預檢紀錄格式有問題，已停止。請保留紀錄並請人協助檢查。");
-      return records;
-    }
-    function readFiles() {
-      const files = GM_getValue(STORE.files, { entries: [], last: null });
-      if (!files || !Array.isArray(files.entries) || files.entries.some(file => !/^[a-f0-9]{64}$/u.test(file.hash) || !Number.isSafeInteger(file.round) || file.round < 0)) throw problem("RECORDS", "預檢檔案紀錄格式有問題，請保留紀錄並請人協助檢查。");
-      return files;
-    }
-    function updateLast() {
-      const files = readFiles(), counts = countsFor(state.queue, readRecords());
-      files.last = { name: state.entry.name, hash: state.entry.hash, total: state.queue.items.length, completed: state.queue.items.length - counts.ready, time: new Date().toISOString() };
-      GM_setValue(STORE.files, files);
-    }
-    function writeRecord(item, status, code, detail) {
-      const records = readRecords();
-      records[recordKey(state.queue.batchId, item.account)] = { account: item.account, batchId: state.queue.batchId, status, code, detail, time: new Date().toISOString() };
-      try { GM_setValue(STORE.records, records); updateLast(); }
-      catch (error) { throw problem("STORAGE", `紀錄無法保存，已停止，請保留頁面並請人協助檢查。${error.message}`); }
-    }
-    function assertCurrentFile() {
-      if (readFiles().entries.find(file => file.hash === state.entry?.hash)?.round !== state.round) throw problem("FILE_CHANGED", "另一分頁已重設或移除這份檔的紀錄，請重新匯入原檔再核對。");
-      state.blacklist = parseBlacklist(GM_getValue(STORE.blacklist, []));
-      if (state.queue) state.queue.blacklist = state.blacklist;
-      if (JSON.stringify(parseBlacklist($("[data-blacklist]").value)) !== JSON.stringify(state.blacklist)) throw problem("BLACKLIST_UNSAVED", "黑名單尚未儲存或已在另一分頁變動，請先核對並儲存黑名單。");
-    }
-    function lockControls() {
-      const locked = state.running || state.importing;
-      for (const element of root.querySelectorAll("input,textarea,select,button")) if (!element.matches("[data-stop],[data-collapse]")) element.disabled = locked;
-      $("[data-start]").disabled = locked || !state.configValid || !state.queue?.items.length;
-      for (const selector of ["[data-export-filtered]", "[data-export-pending]", "[data-export-list]", "[data-new-round]", "[data-recheck]", "[data-mark-manual]", "[data-mark-blocked]"]) $(selector).disabled = locked || !state.entry;
-      const selected = state.queue?.items.find(item => item.account === $("[data-preview-select]").value);
-      $("[data-mark-manual]").disabled = locked || !state.configValid || !selected || itemState(state.queue, readRecords(), selected) === "blocked";
-      $("[data-mark-blocked]").disabled = locked || !selected || state.blacklist.includes(selected.account);
-      $("[data-stop]").classList.toggle("hidden", !state.running);
-    }
-    function refreshPreview() {
-      const item = state.queue?.items.find(buyer => buyer.account === $("[data-preview-select]").value);
-      $("[data-preview]").textContent = state.configValid ? item?.message || "請先匯入直播原始檔。" : "訊息尚未完成，請修正後核對預覽。";
-      $("[data-source]").textContent = item ? `這位在檔裡有 ${item.rowCount} 列；狀態：${LABELS[itemState(state.queue, readRecords(), item)]}` : "";
-      $("[data-mark-manual]").disabled = state.running || state.importing || !item || itemState(state.queue, readRecords(), item) === "blocked";
-    }
-    function render() {
-      try {
-        const records = readRecords(), files = readFiles(), previous = $("[data-preview-select]").value;
-        $("[data-resume]").textContent = !state.entry && files.last && files.last.completed < files.last.total ? `上次的檔 ${files.last.name} 查到 ${files.last.completed}／${files.last.total} 位。重新選同一份檔，就會接著跑，已送出的人不會再收到訊息；失敗的會再試。` : "";
-        if (state.entry) {
-          const entry = state.entry, counts = countsFor(state.queue, records);
-          $("[data-file-list]").textContent = `${entry.name}\n${entry.sourceRows} 列資料、${state.queue.items.length} 位買家。\n沒喊單的留言 ${entry.inactiveRows} 列、沒有帳號 ${entry.emptyAccountRows} 列，這些不發訊息。`;
-          $("[data-summary]").textContent = Object.keys(LABELS).map(status => `${LABELS[status]} ${counts[status]} 位`).join("、");
-          $("[data-preview-select]").innerHTML = state.queue.items.map(item => `<option value="${escapeHtml(item.account)}">${escapeHtml(item.account)}</option>`).join("");
-          if (state.queue.items.some(item => item.account === previous)) $("[data-preview-select]").value = previous;
-          const missing = state.queue.items.filter(item => ["notFound", "searchUnconfirmed"].includes(itemState(state.queue, records, item)));
-          $("[data-not-found]").classList.toggle("hidden", !missing.length); $("[data-not-found-list]").textContent = missing.map(item => item.account).join("\n");
-          $("[data-streak]").textContent = streakWarning(state.queue, records);
+    return to;
+  };
+  var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__getProtoOf(mod)) : {}, __copyProps(
+    // If the importer is in node compatibility mode or this is not an ESM
+    // file that has been converted to a CommonJS file using a Babel-
+    // compatible transform (i.e. "__esModule" has not been set), then set
+    // "default" to the CommonJS "module.exports" for node compatibility.
+    isNodeMode || !mod || !mod.__esModule ? __defProp(target, "default", { value: mod, enumerable: true }) : target,
+    mod
+  ));
+
+  // src/util.cjs
+  var require_util = __commonJS({
+    "src/util.cjs"(exports, module) {
+      "use strict";
+      var TaskError = class extends Error {
+        constructor(code, message) {
+          super(message);
+          this.name = "TaskError";
+          this.code = code;
         }
-        refreshPreview(); lockControls();
-      } catch (error) { state.configValid = false; lockControls(); showStatus(error.message, true); }
+      };
+      var problem = (code, message) => new TaskError(code, message);
+      var norm = (value) => String(value ?? "").normalize("NFKC").replace(/\uFEFF/gu, "").replace(/\s+/gu, " ").trim();
+      var ordinal = (a, b) => String(a) < String(b) ? -1 : String(a) > String(b) ? 1 : 0;
+      var decimal = (value) => typeof value === "string" && /^[0-9]+$/u.test(value) && BigInt(value) > 0n;
+      var safeUid = (value) => typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+      var compareIds = (a, b) => {
+        if (!decimal(a) || !decimal(b)) throw problem("DATA", "訊息編號不是完整數字文字，已停止。");
+        return BigInt(a) < BigInt(b) ? -1 : BigInt(a) > BigInt(b) ? 1 : 0;
+      };
+      function clone(value) {
+        if (value === null || value === void 0 || ["string", "number", "boolean"].includes(typeof value)) return value;
+        if (Array.isArray(value)) return value.map(clone);
+        if (typeof value !== "object" || Object.prototype.toString.call(value) !== "[object Object]") throw problem("RECORDS", "紀錄含有不支援的資料，請保留紀錄並請人協助。");
+        const out = {};
+        for (const key of Object.keys(value)) Object.defineProperty(out, key, { value: clone(value[key]), writable: true, enumerable: true, configurable: true });
+        return out;
+      }
+      function canonical(value) {
+        if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+        if (value && typeof value === "object") return `{${Object.keys(value).sort(ordinal).map((k) => `${JSON.stringify(k)}:${canonical(value[k])}`).join(",")}}`;
+        if (value === void 0) return '"__undefined__"';
+        return JSON.stringify(value);
+      }
+      async function sha256(bytes) {
+        if (!globalThis.crypto?.subtle) throw problem("CRYPTO", "瀏覽器無法核對檔案，請使用新版 Chrome／Edge。");
+        const input = typeof bytes === "string" ? new TextEncoder().encode(bytes) : bytes;
+        const hash = await crypto.subtle.digest("SHA-256", input);
+        return [...new Uint8Array(hash)].map((b) => b.toString(16).padStart(2, "0")).join("");
+      }
+      var safeMessage = (error) => error instanceof TaskError ? error.message : "讀取失敗，已停止；請保留原檔並請人協助。";
+      module.exports = { TaskError, problem, norm, ordinal, decimal, safeUid, compareIds, clone, canonical, sha256, safeMessage };
     }
-    $("[data-config]").value = config.template;
-    $("[data-blacklist]").value = state.blacklist.join("\n");
-    function saveBlacklist(accounts) {
-      const next = parseBlacklist(accounts);
-      GM_setValue(STORE.blacklist, next); state.blacklist = next;
-      $("[data-blacklist]").value = next.join("\n");
-      if (state.queue) state.queue.blacklist = next;
-      $("[data-authorize]").checked = false;
-      $("[data-blacklist-status]").textContent = `已儲存 ${next.length} 位黑名單。`;
-      render();
-    }
-    $("[data-blacklist]").addEventListener("input", () => { $("[data-authorize]").checked = false; $("[data-blacklist-status]").textContent = "尚未儲存，請按儲存黑名單。"; });
-    $("[data-save-blacklist]").addEventListener("click", async () => {
-      if (state.running || state.importing) return;
-      try { await withLock(() => saveBlacklist($("[data-blacklist]").value)); } catch (error) { showStatus(error.message, true); }
-    });
-    async function resolveSelected(manual) {
-      if (state.running || state.importing || !state.entry) return;
-      const item = state.queue.items.find(buyer => buyer.account === $("[data-preview-select]").value);
-      if (!item) return;
-      if (manual && (!state.configValid || itemState(state.queue, readRecords(), item) === "blocked")) return;
-      const confirmation = manual ? `確認已人工送出本檔的作業訊息給 ${item.account}？\n${item.message}\n只更新紀錄，不會送出訊息。` : `將 ${item.account} 列入黑名單？後續不發送，此帳號所有列不納入叫貨或待處理直播檔。`;
-      if (!window.confirm(confirmation)) return;
-      try { await withLock(() => { assertCurrentFile(); if (manual && state.blacklist.includes(item.account)) throw problem("BLACKLISTED", "此帳號已列入黑名單，不能標記為人工送出。"); if (manual) writeRecord(item, "manualSent", "MANUAL_CONFIRMED", "使用者核對本檔作業訊息，確認已人工送出"); else saveBlacklist([...state.blacklist, item.account]); $("[data-authorize]").checked = false; render(); showStatus(`${item.account}：${manual ? "已人工送出" : "黑名單排除"}，只更新紀錄。`); }); }
-      catch (error) { showStatus(error.message, true); }
-    }
-    $("[data-mark-manual]").addEventListener("click", () => resolveSelected(true));
-    $("[data-mark-blocked]").addEventListener("click", () => resolveSelected(false));
-    $("[data-config]").addEventListener("input", () => {
-      $("[data-authorize]").checked = false;
-      try {
-        // 即使暫時清空，也保存文字；不能帶著舊預覽發送。
-        GM_setValue(STORE.config, { template: $("[data-config]").value });
-        const next = validateConfig({ template: $("[data-config]").value });
-        const queue = state.entry ? buildQueue(state.entry, next, state.round, state.blacklist) : null;
-        config = next; state.queue = queue; state.configValid = true; render(); showStatus("");
-      } catch (error) { state.configValid = false; refreshPreview(); lockControls(); showStatus(error.message, true); }
-    });
-    $("[data-preview-select]").addEventListener("change", refreshPreview);
-    $("[data-dry]").addEventListener("change", () => { $("[data-authorize]").checked = false; $("[data-start]").textContent = $("[data-dry]").checked ? "開始演練" : "開始正式發送"; });
-    $("[data-stop]").addEventListener("click", () => { state.stop = true; showStatus("正在停止；還沒查的人會原樣留在匯出的檔裡。"); });
-    $("[data-collapse]").addEventListener("click", () => { panel.classList.toggle("closed"); $("[data-collapse]").textContent = panel.classList.contains("closed") ? "展開" : "收合"; keepPanelInView(); savePanelPosition(); });
-    async function withLock(action) {
-      if (!navigator.locks?.request) throw problem("LOCK", "瀏覽器不支援分頁發送鎖，請使用新版 Chrome／Edge。");
-      return navigator.locks.request(LOCK_NAME, { ifAvailable: true }, lock => { if (!lock) throw problem("LOCK", "結單通知或另一個帳號預檢正在執行，請等它完成。"); return action(); });
-    }
-    $("[data-files]").addEventListener("change", async event => {
-      const input = event.currentTarget;
-      if (state.running || state.importing) return;
-      state.importing = true; $("[data-authorize]").checked = false; lockControls();
-      try {
-        if (!input.files.length) return;
-        if (input.files.length !== 1) throw problem("FILE", "一次只能匯入一份直播原始 CSV。");
-        const file = input.files[0], entry = await readSource(await file.arrayBuffer(), file.name);
-        await withLock(() => {
-          const files = readFiles(), changed = files.last?.name === entry.name && files.last?.hash !== entry.hash;
-          const next = pruneFiles(files, readRecords(), entry), nextConfig = validateConfig({ template: $("[data-config]").value }), queue = buildQueue(entry, nextConfig, next.round, state.blacklist);
-          GM_setValue(STORE.records, next.records); GM_setValue(STORE.files, next.files);
-          state.entry = entry; state.round = next.round; state.queue = queue; config = nextConfig; state.configValid = true; updateLast(); render();
-          showStatus(changed ? "這份檔的內容和上次那一份不一樣，會當成新的檔，所有人都會再收到訊息。" : "已匯入；同一份檔會接著跑，請核對訊息與買家預覽。");
-        });
-      } catch (error) { showStatus(error.message, true); }
-      finally { input.value = ""; state.importing = false; lockControls(); }
-    });
-    $("[data-export-filtered]").addEventListener("click", () => {
-      try { if (state.running || state.importing || !state.entry) return; assertCurrentFile(); const result = filteredExport(state.entry, state.queue, readRecords()); if (window.confirm(result.confirmation)) download(result.bytes, result.filename, "text/csv;charset=utf-8"); }
-      catch (error) { showStatus(error.message, true); }
-    });
-    $("[data-export-list]").addEventListener("click", () => {
-      try { if (state.running || state.importing || !state.entry) return; assertCurrentFile(); download(listCsv(state.queue, readRecords()), state.entry.name.replace(/\.csv$/iu, "") + "_預檢結果.csv", "text/csv;charset=utf-8"); }
-      catch (error) { showStatus(error.message, true); }
-    });
-    $("[data-export-pending]").addEventListener("click", () => {
-      try { if (state.running || state.importing || !state.entry) return; assertCurrentFile(); const result = pendingExport(state.entry, state.queue, readRecords()); if (window.confirm(result.confirmation)) download(result.bytes, result.filename, "text/csv;charset=utf-8"); }
-      catch (error) { showStatus(error.message, true); }
-    });
-    async function resetRecords(all) {
-      if (state.running || state.importing || !state.entry) return;
-      try {
-        assertCurrentFile();
-        const missing = state.queue.items.filter(item => ["notFound", "searchUnconfirmed"].includes(itemState(state.queue, readRecords(), item)));
-        if (!all && !missing.length) return;
-        const message = all ? "這份檔裡已經發過的人會再收到一次，黑名單仍排除，其餘人回到尚未發送。確定？" : `會把目前『搜尋未確認』的 ${missing.length} 位改回『尚未發送』。之後勾授權、按開始，會重新搜尋這幾位；搜尋得到的會收到訊息。確定？`;
-        if (!window.confirm(message)) return;
-        state.importing = true; lockControls();
-        await withLock(() => {
-          assertCurrentFile();
-          if (all) {
-            const files = readFiles(), file = files.entries.find(entry => entry.hash === state.entry.hash); file.round++;
-            GM_setValue(STORE.files, files); state.round = file.round; state.queue = buildQueue(state.entry, config, state.round, state.blacklist);
-          } else {
-            const records = readRecords(); for (const item of missing) delete records[recordKey(state.queue.batchId, item.account)]; GM_setValue(STORE.records, records);
-          }
-          updateLast(); $("[data-authorize]").checked = false; render(); showStatus("已改回尚未發送。請重新核對、勾授權，再按開始。");
-        });
-      } catch (error) { showStatus(error.message, true); }
-      finally { state.importing = false; render(); }
-    }
-    $("[data-recheck]").addEventListener("click", () => resetRecords(false));
-    $("[data-new-round]").addEventListener("click", () => resetRecords(true));
-    async function delay(milliseconds) {
-      const deadline = Date.now() + milliseconds;
-      while (Date.now() < deadline) { assertSafe(() => state.stop); assertCurrentFile(); await new Promise(resolve => setTimeout(resolve, Math.min(250, deadline - Date.now()))); }
-    }
-    async function run(dryRun) {
-      const queue = state.queue;
-      if (!state.configValid || !queue?.items.length) throw problem("QUEUE", "請先匯入有買家帳號的直播原始檔，並核對訊息。");
-      assertCurrentFile(); assertSafe(() => state.stop);
-      const records = readRecords(), items = dryRun ? queue.items.filter(item => itemState(queue, records, item) === "ready").slice(0, 3) : runnableItems(queue, records);
-      if (!items.length) { showStatus("沒有可發送的帳號；搜尋未確認者需按『搜尋未確認的重新查一次』。黑名單不發送。"); return; }
-      for (let index = 0; index < items.length; index++) {
-        const item = items[index]; assertSafe(() => state.stop); assertCurrentFile();
-        if (!["ready", "failed"].includes(itemState(queue, readRecords(), item))) continue;
-        showStatus(`${dryRun ? "演練" : "預檢"} ${index + 1}／${items.length}：${item.account}`);
-        let clicked = false, prepared = false;
+  });
+
+  // src/precheck-core.cjs
+  var require_precheck_core = __commonJS({
+    "src/precheck-core.cjs"(exports, module) {
+      "use strict";
+      var { problem, norm, clone } = require_util();
+      var HEADERS = Object.freeze(["擷取時間", "直播Session", "限定時段序號", "留言ID", "買家UID", "買家帳號", "原始留言", "正規化留言", "商品代號", "品名", "規格尺寸", "數量", "價格", "狀態", "待確認", "來源", "喊單則數", "彙總件數"]);
+      function effectiveBuyerText(value) {
+        if (value == null) return { ok: true, text: "" };
+        if (typeof value === "string") return { ok: true, text: value };
+        if (typeof value !== "object" || Object.prototype.toString.call(value) === "[object Date]") return { ok: false, text: "" };
+        if (Object.hasOwn(value, "formula") || Object.hasOwn(value, "sharedFormula")) return { ok: typeof value.result === "string", text: typeof value.result === "string" ? value.result : "" };
+        if (typeof value.text === "string") return { ok: true, text: value.text };
+        if (Array.isArray(value.richText) && value.richText.every((part) => typeof part?.text === "string")) return { ok: true, text: value.richText.map((part) => part.text).join("") };
+        return { ok: false, text: "" };
+      }
+      function validateBuyerAccount(value) {
+        const extracted = effectiveBuyerText(value);
+        let text = extracted.text.trim();
+        const wrapped = text.match(/^="((?:[^"]|"")*)"$/u);
+        if (wrapped) text = wrapped[1].replace(/""/gu, '"');
+        text = norm(text);
+        const converted = /^(?:\d+-(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)(?:-\d{2})?|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)-\d{2}|\d+月\d+日|\d{4}\/\d{1,2}\/\d{1,2}|[+-]?\d+(?:\.\d+)?E[+-]\d+|\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})|TRUE|FALSE|#NAME\?|#VALUE!|#REF!|#DIV\/0!|#N\/A|#NUM!|#NULL!)$/u.test(text);
+        return { ok: extracted.ok && !converted, text };
+      }
+      function parseBlacklist(value) {
+        const lines = Array.isArray(value) ? value : String(value ?? "").split(/\r?\n/u);
+        const accounts = lines.map((line) => validateBuyerAccount(line));
+        if (accounts.some((account) => !account.ok || /\s/u.test(account.text))) throw problem("BLACKLIST", "黑名單請每行填一個完整買家帳號，不可使用日期、科學記號或含空白的帳號。");
+        return [...new Set(accounts.map((account) => account.text).filter(Boolean))];
+      }
+      function splitCsv(text) {
+        const source = String(text).replace(/^\uFEFF/u, ""), records = [];
+        let fields = [], field = "", quoted = false, start = 0;
+        function push(end, ending = "") {
+          fields.push(field.replace(/\r$/u, ""));
+          records.push({ raw: source.slice(start, end), ending, fields, row: records.length + 1 });
+          fields = [];
+          field = "";
+        }
+        for (let i = 0; i < source.length; i++) {
+          const ch = source[i];
+          if (quoted) {
+            if (ch === '"' && source[i + 1] === '"') {
+              field += '"';
+              i++;
+            } else if (ch === '"') quoted = false;
+            else field += ch;
+          } else if (ch === '"') quoted = true;
+          else if (ch === ",") {
+            fields.push(field);
+            field = "";
+          } else if (ch === "\n") {
+            const end = i > start && source[i - 1] === "\r" ? i - 1 : i;
+            push(end, source.slice(end, i + 1));
+            start = i + 1;
+          } else field += ch;
+        }
+        if (quoted) throw problem("CSV_QUOTE", "直播 CSV 有未閉合的雙引號，請使用抓單匯出的原檔。");
+        if (start < source.length) push(source.length);
+        return records;
+      }
+      var blankRecord = (record) => !record.fields.some((cell) => String(cell).trim());
+      function parseSource(buffer, filename) {
+        if (!/\.csv$/iu.test(filename) || filename.startsWith("~$")) throw problem("FILE", "請選擇 .csv 直播原始檔，勿選 Excel 暫存鎖定檔。");
+        const bytes = buffer instanceof Uint8Array ? new Uint8Array(buffer) : new Uint8Array(buffer);
+        let text;
         try {
-          await sendOne(item, { dryRun, stopRequested: () => state.stop, beforeClick: () => { assertCurrentFile(); writeRecord(item, "pending", "PREPARED", "已準備點送出，結果待核對"); prepared = true; }, onClick: () => { clicked = true; } });
-          if (!dryRun) writeRecord(item, "sent", "", "點送出後，已確認同一對話輸入框清空");
-          log(`${item.account}：${dryRun ? "演練核對通過，沒有送出" : "已送出"}`);
-        } catch (error) {
-          log(`${item.account}：${error.message}`);
-          const fatal = ["STOP", "SECURITY_CHALLENGE", "OTHER_SENDER", "SEARCH_UNRELIABLE", "SEARCH_INPUT", "FILE_CHANGED", "BLACKLIST_UNSAVED", "STORAGE", "RECORDS"].includes(error.code);
-          if (!dryRun) {
-            if (fatal && !clicked) {
-              // pending 已先存，若送出前收到停止仍須回到尚未發送；硬關頁則保留 pending。
-              if (prepared) { const next = readRecords(); delete next[recordKey(queue.batchId, item.account)]; GM_setValue(STORE.records, next); updateLast(); }
-            } else writeRecord(item, clicked ? "pending" : error.code === "SEARCH_UNCONFIRMED" ? "searchUnconfirmed" : error.code === "DRAFT" ? "draft" : "failed", error.code || "UNKNOWN", error.message);
-          }
-          render(); if (fatal) throw error;
+          text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+        } catch {
+          throw problem("UTF8", "檔案不是合法的 UTF-8，可能被 Excel 另存過，請用抓單匯出的原檔。");
         }
-        render();
-        if (index < items.length - 1) await delay(dryRun ? 500 : 15000 + Math.floor(Math.random() * 10001));
+        const records = splitCsv(text);
+        if (!records.length) throw problem("EMPTY", "檔案是空的，請選擇抓單匯出的原檔。");
+        const actual = records[0].fields.map((value) => value.trim());
+        if (![HEADERS.length, HEADERS.length + 1].includes(actual.length) || HEADERS.some((value, i) => actual[i] !== value) || actual.length === HEADERS.length + 1 && actual.at(-1) !== "喊單歷程") throw problem("HEADERS", `表頭必須是直播固定 18 欄，或在其後加第 19 欄「喊單歷程」，且順序相同。實際表頭：${actual.join("｜") || "（空白）"}`);
+        let sourceRows = 0, inactiveRows = 0, emptyAccountRows = 0;
+        const active = /* @__PURE__ */ new Set(), rowCounts = /* @__PURE__ */ new Map(), issues = [];
+        for (const record of records.slice(1)) {
+          if (blankRecord(record)) continue;
+          sourceRows++;
+          if (record.fields.length !== actual.length) throw problem("WIDTH", `第 ${record.row} 列不是 ${actual.length} 格（實際 ${record.fields.length} 格），整份未匯入。`);
+          const account = validateBuyerAccount(record.fields[5]);
+          if (!account.ok) issues.push(`第 ${record.row} 列：帳號疑似被 Excel 轉型，請核對抓單匯出的原檔。`);
+          record.account = account.text;
+          if (account.text) rowCounts.set(account.text, (rowCounts.get(account.text) || 0) + 1);
+          const inactive = record.fields[13].trim() === "inactiveCode";
+          if (inactive) inactiveRows++;
+          if (!account.text) emptyAccountRows++;
+          if (!inactive && account.text) active.add(account.text);
+        }
+        if (issues.length) throw problem("ACCOUNT", issues.join("\n"));
+        if (!sourceRows) throw problem("EMPTY", "檔案只有表頭，沒有資料列，整份未匯入。");
+        const accounts = [...active].sort((a, b) => a.localeCompare(b, "zh-Hant", { numeric: true }));
+        return { name: filename, bytes, text, records, accounts, rowCounts, sourceRows, inactiveRows, emptyAccountRows, bom: text.startsWith("\uFEFF"), newline: /\r?\n/u.exec(text)?.[0] || "\n", trailing: text.endsWith("\n") };
       }
-      showStatus(`${dryRun ? "演練" : "本次預檢"}完成。${dryRun ? "沒有填字、送出或寫發送紀錄。" : "請核對各狀態；叫貨用直播檔只納入已確認發送者，其他資料另匯出待處理。"}`);
+      async function readSource(buffer, filename) {
+        const entry = parseSource(buffer, filename);
+        const hash = await crypto.subtle.digest("SHA-256", entry.bytes);
+        entry.hash = [...new Uint8Array(hash)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+        return entry;
+      }
+      function batchId(hash, round) {
+        return `precheck:${hash}:${round}`;
+      }
+      function recordKey(scope, account) {
+        return JSON.stringify([scope, account]);
+      }
+      function recordState(records, scope, account) {
+        return records[recordKey(scope, account)]?.status || "ready";
+      }
+      function pruneFiles(files, records, entry) {
+        const prior = files.entries.find((file) => file.hash === entry.hash);
+        const updated = { hash: entry.hash, round: prior?.round || 0, name: entry.name, usedAt: (/* @__PURE__ */ new Date()).toISOString() };
+        const entries = [updated, ...files.entries.filter((file) => file.hash !== entry.hash)].slice(0, 20);
+        const retained = new Set(entries.map((file) => file.hash)), nextRecords = {};
+        for (const [key, record] of Object.entries(records)) {
+          const hash = /^precheck:([a-f0-9]{64}):\d+$/u.exec(record.batchId)?.[1];
+          if (retained.has(hash)) nextRecords[key] = record;
+        }
+        return { files: { ...files, entries }, records: nextRecords, round: updated.round };
+      }
+      function toCsv(rows) {
+        return "\uFEFF" + rows.map((row, rowIndex) => row.map((value, colIndex) => {
+          let text = String(value ?? "");
+          if (rowIndex > 0 && colIndex === 0) text = `="${text.replace(/"/gu, '""')}"`;
+          else if (/^[=+@\-\t\r]/u.test(text)) text = `'${text}`;
+          return `"${text.replace(/"/gu, '""')}"`;
+        }).join(",")).join("\r\n");
+      }
+      var LEGACY_LABELS = Object.freeze({ ready: "還沒查", sent: "已送出（舊）", manualSent: "已人工送出（舊）", blocked: "黑名單排除", searchUnconfirmed: "搜尋未確認", notFound: "搜尋未確認（舊）", pending: "舊的可能已送出，待重新查", draft: "舊的有草稿，待重新查", failed: "失敗，可再查" });
+      var LABELS = Object.freeze({ ...LEGACY_LABELS, found: "找得到，留", chatBlocked: "聊聊已封鎖" });
+      var RETRYABLE = Object.freeze(["ready", "failed", "pending", "draft"]);
+      function itemState(queue, records, item) {
+        return queue.blacklist?.includes(item.account) ? "blocked" : recordState(records, queue.batchId, item.account);
+      }
+      function buildQueue(entry, _unused = null, round = 0, blacklist = []) {
+        return { batchId: batchId(entry.hash, round), blacklist: parseBlacklist(blacklist), items: entry.accounts.map((account) => ({ account, rowCount: entry.rowCounts.get(account) || 0 })) };
+      }
+      function runnableItems(queue, records) {
+        return queue.items.filter((i) => RETRYABLE.includes(itemState(queue, records, i)));
+      }
+      function bucket(queue, records, item) {
+        const state = itemState(queue, records, item), r = records[recordKey(queue.batchId, item.account)];
+        if (state === "blocked") return "blacklist";
+        if (state === "chatBlocked") return "chatBlocked";
+        if (state === "found") return "found";
+        if (state === "manualSent") return r?.code === "MANUAL_FOUND" ? "manualFound" : "legacySent";
+        if (state === "sent") return "legacySent";
+        if (["notFound", "searchUnconfirmed"].includes(state)) return "searchUnconfirmed";
+        if (RETRYABLE.includes(state)) return "unchecked";
+        throw problem("RECORDS", "預檢紀錄狀態不支援，已停止。");
+      }
+      function displayLabel(queue, records, item) {
+        return itemState(queue, records, item) === "manualSent" && records[recordKey(queue.batchId, item.account)]?.code === "MANUAL_FOUND" ? "人工確認找得到" : LABELS[itemState(queue, records, item)];
+      }
+      function countsFor(queue, records) {
+        const out = Object.fromEntries(Object.keys(LABELS).map((k) => [k, 0]));
+        for (const i of queue.items) out[itemState(queue, records, i)]++;
+        return out;
+      }
+      function summary(queue, records) {
+        const out = { found: 0, manualFound: 0, legacySent: 0, chatBlocked: 0, searchUnconfirmed: 0, blacklist: 0, unchecked: 0 };
+        for (const i of queue.items) out[bucket(queue, records, i)]++;
+        out.total = queue.items.length;
+        out.accepted = out.found + out.manualFound + out.legacySent;
+        out.completed = out.total - out.unchecked;
+        return out;
+      }
+      function summaryText(s) {
+        return `找得到 ${s.found} 位、人工確認找得到 ${s.manualFound} 位、舊紀錄已送出 ${s.legacySent} 位、聊聊已封鎖 ${s.chatBlocked} 位、搜尋未確認 ${s.searchUnconfirmed} 位、黑名單 ${s.blacklist} 位、還沒查 ${s.unchecked} 位。`;
+      }
+      function streakWarning(queue, records) {
+        let n = 0, max = 0;
+        for (const i of queue.items) {
+          n = bucket(queue, records, i) === "searchUnconfirmed" ? n + 1 : 0;
+          max = Math.max(n, max);
+        }
+        return max >= 3 ? `有 ${max} 位連續搜尋未確認，請核對網路與搜尋畫面，再決定手動重查。` : "";
+      }
+      function listCsv(queue, records) {
+        const priority = { blacklist: 0, chatBlocked: 0, searchUnconfirmed: 1, unchecked: 2, found: 3, manualFound: 3, legacySent: 3 };
+        const items = [...queue.items].sort((a, b) => priority[bucket(queue, records, a)] - priority[bucket(queue, records, b)]);
+        return toCsv([["買家帳號", "這位在檔裡有幾列", "狀態", "說明", "時間"], ...items.map((i) => {
+          const r = records[recordKey(queue.batchId, i.account)];
+          return [i.account, i.rowCount, displayLabel(queue, records, i), itemState(queue, records, i) === "blocked" ? "本腳本黑名單排除" : r?.detail || "", r?.time || ""];
+        })]);
+      }
+      function exportPartition(entry, queue, records, pendingOnly = false) {
+        if (!queue.items.length) throw problem("QUEUE", "檔案沒有可預檢的買家。");
+        const s = summary(queue, records), excluded = new Set(queue.blacklist || []), accepted = /* @__PURE__ */ new Set();
+        for (const i of queue.items) {
+          const b = bucket(queue, records, i);
+          if (["blacklist", "chatBlocked"].includes(b)) excluded.add(i.account);
+          if (["found", "manualFound", "legacySent"].includes(b)) accepted.add(i.account);
+        }
+        const select = (r) => !excluded.has(r.account) && (pendingOnly ? !accepted.has(r.account) : accepted.has(r.account));
+        const kept = entry.records.filter((r, index) => index === 0 || blankRecord(r) || select(r));
+        if (!kept.slice(1).some((r) => !blankRecord(r))) throw problem(pendingOnly ? "NO_PENDING" : "NO_CONFIRMED", pendingOnly ? "沒有待處理資料。" : "沒有預檢通過的買家，不能產生叫貨用檔。");
+        const removedRows = entry.records.length - kept.length, text = removedRows ? (entry.bom ? "\uFEFF" : "") + kept.map((r) => r.raw + r.ending).join("") : entry.text;
+        const check = splitCsv(text);
+        if (check.length !== kept.length || check.some((r, i) => r.raw !== kept[i].raw || r.ending !== kept[i].ending || i > 0 && !blankRecord(r) && !select({ account: validateBuyerAccount(r.fields[5]).text }))) throw problem("EXPORT_CHECK", "匯出自我檢查未通過，沒有下載；請保留原檔。");
+        const excludedRows = entry.records.filter((r) => excluded.has(r.account)).length;
+        const confirmation = [pendingOnly ? "這是待處理直播檔，請勿拿來叫貨。" : "這是預檢通過的直播檔，供控貨助手建立新場次。", summaryText(s), `排除 ${excludedRows} 列；此檔保留 ${kept.slice(1).filter((r) => !blankRecord(r)).length} 列。原檔不修改。`, s.unchecked ? "還沒查完；後續查完須重新匯出，並用新檔另建場次。" : "", streakWarning(queue, records), "確定匯出？"].filter(Boolean).join("\n");
+        return { text, bytes: removedRows ? new TextEncoder().encode(text) : entry.bytes, filename: entry.name.replace(/\.csv$/iu, "") + (pendingOnly ? "_待處理.csv" : "_預檢通過.csv"), confirmation, removedRows };
+      }
+      var filteredExport = (e, q, r) => exportPartition(e, q, r);
+      var pendingExport = (e, q, r) => exportPartition(e, q, r, true);
+      module.exports = { HEADERS, LEGACY_LABELS, LABELS, RETRYABLE, validateBuyerAccount, parseBlacklist, splitCsv, parseSource, readSource, batchId, recordKey, recordState, itemState, buildQueue, runnableItems, countsFor, summary, summaryText, streakWarning, pruneFiles, toCsv, listCsv, filteredExport, pendingExport, exportPartition, displayLabel, blankRecord };
     }
-    $("[data-start]").addEventListener("click", async () => {
-      if (state.running || state.importing) return;
-      try {
-        if (!$("[data-authorize]").checked) throw problem("AUTHORIZE", "請先核對預覽，勾選本次操作授權。");
-        const dryRun = $("[data-dry]").checked; state.running = true; state.stop = false; $("[data-authorize]").checked = false; lockControls();
-        await withLock(() => run(dryRun));
-      } catch (error) { showStatus(error.message, true); }
-      finally { state.running = false; state.stop = false; render(); }
-    });
-    render();
-    if (typeof GM_registerMenuCommand === "function") {
-      GM_registerMenuCommand("開啟帳號預檢", () => { panel.classList.remove("closed"); $("[data-collapse]").textContent = "收合"; keepPanelInView(); savePanelPosition(); });
-      GM_registerMenuCommand("重設帳號預檢面板位置", () => { placePanel(18, 18); savePanelPosition(); });
+  });
+
+  // src/precheck-storage.cjs
+  var require_precheck_storage = __commonJS({
+    "src/precheck-storage.cjs"(exports, module) {
+      "use strict";
+      var { problem, clone, canonical, sha256 } = require_util();
+      var core2 = require_precheck_core();
+      var STORE = Object.freeze({ records: "precheck:records:v2", files: "precheck:files:v2", migration: "precheck:migration:v2", legacyRecords: "precheck:records:v1", legacyFiles: "precheck:files:v1", blacklist: "precheck:blacklist:v1", panelPosition: "precheck:panel-position:v1" });
+      var emptyFiles = () => ({ entries: [], last: null });
+      function validateRecords(records, legacy = false) {
+        const labels = legacy ? core2.LEGACY_LABELS : core2.LABELS;
+        if (!records || typeof records !== "object" || Array.isArray(records)) throw problem("RECORDS", "預檢紀錄格式有問題，請保留紀錄並請人協助。");
+        for (const [key, r] of Object.entries(records)) if (!r || typeof r.account !== "string" || typeof r.batchId !== "string" || !Object.hasOwn(labels, r.status) || r.status === "ready" || key !== core2.recordKey(r.batchId, r.account)) throw problem("RECORDS", "預檢紀錄身分或狀態不正確，已停止。");
+        return records;
+      }
+      function validateFiles(files) {
+        if (!files || typeof files !== "object" || !Array.isArray(files.entries) || files.entries.some((f) => !f || !/^[a-f0-9]{64}$/u.test(f.hash) || !Number.isSafeInteger(f.round) || f.round < 0) || new Set(files.entries.map((f) => f.hash)).size !== files.entries.length) throw problem("RECORDS", "預檢檔案紀錄不正確，請保留紀錄並請人協助。");
+        return files;
+      }
+      function createRepository(gm) {
+        const get = async (k, d) => clone(await gm.get(k, d)), set = async (k, v) => {
+          try {
+            await gm.set(k, clone(v));
+          } catch {
+            throw problem("STORAGE", "紀錄無法保存，已停止；請保留頁面與原檔。");
+          }
+        };
+        async function read() {
+          return { records: validateRecords(await get(STORE.records)), files: validateFiles(await get(STORE.files)) };
+        }
+        async function migrate() {
+          let journal = await get(STORE.migration);
+          if (journal?.phase === "ready") return read();
+          if (journal && journal.phase !== "pending") throw problem("RECORDS", "遷移標記格式不正確，已停止。");
+          if (!journal) {
+            if (await get(STORE.records) !== void 0 || await get(STORE.files) !== void 0) throw problem("RECORDS", "新版紀錄只有部分資料且沒有遷移證據，已停止，請勿清紀錄重跑。");
+            const bundle = { records: validateRecords(await get(STORE.legacyRecords, {}), true), files: validateFiles(await get(STORE.legacyFiles, emptyFiles())) };
+            journal = { phase: "pending", bundle, hash: await sha256(canonical(bundle)), startedAt: (/* @__PURE__ */ new Date()).toISOString() };
+            await set(STORE.migration, journal);
+          }
+          validateRecords(journal.bundle?.records, true);
+          validateFiles(journal.bundle?.files);
+          if (await sha256(canonical(journal.bundle)) !== journal.hash) throw problem("RECORDS", "遷移快照核對失敗，已停止；舊版紀錄保留。");
+          await set(STORE.records, journal.bundle.records);
+          await set(STORE.files, journal.bundle.files);
+          const checked = await read();
+          if (canonical(checked) !== canonical(journal.bundle)) throw problem("STORAGE", "新紀錄回讀不一致，遷移未完成，請保留紀錄。");
+          await set(STORE.migration, { phase: "ready", sourceHash: journal.hash, completedAt: (/* @__PURE__ */ new Date()).toISOString() });
+          return checked;
+        }
+        async function importEntry(entry) {
+          const { files, records } = await read();
+          const next = core2.pruneFiles(files, records, entry);
+          await set(STORE.records, next.records);
+          await set(STORE.files, next.files);
+          return next;
+        }
+        async function assertBatch(queue, hash) {
+          const value = await read();
+          if (value.files.entries.find((f) => f.hash === hash)?.round !== Number(queue.batchId.split(":").at(-1))) throw problem("FILE_CHANGED", "另一分頁已重設或移除本檔，請重新匯入原檔再核對。");
+          return value;
+        }
+        async function write(queue, entry, item, status, code, detail) {
+          const value = await assertBatch(queue, entry.hash);
+          if (!Object.hasOwn(core2.LABELS, status) || status === "ready") throw problem("RECORDS", "不支援的檢查結果。");
+          value.records[core2.recordKey(queue.batchId, item.account)] = { account: item.account, batchId: queue.batchId, status, code, detail, time: (/* @__PURE__ */ new Date()).toISOString() };
+          await set(STORE.records, value.records);
+          await updateLast(queue, entry);
+          return value.records;
+        }
+        async function updateLast(queue, entry) {
+          const value = await assertBatch(queue, entry.hash), s = core2.summary(queue, value.records);
+          value.files.last = { name: entry.name, hash: entry.hash, total: s.total, completed: s.completed, progressVersion: 2, time: (/* @__PURE__ */ new Date()).toISOString() };
+          await set(STORE.files, value.files);
+          return s;
+        }
+        async function recheck(queue, entry, all) {
+          const value = await assertBatch(queue, entry.hash);
+          if (all) {
+            const file = value.files.entries.find((f) => f.hash === entry.hash);
+            file.round++;
+            await set(STORE.files, value.files);
+            return file.round;
+          }
+          for (const item of queue.items) if (["notFound", "searchUnconfirmed"].includes(core2.itemState(queue, value.records, item))) delete value.records[core2.recordKey(queue.batchId, item.account)];
+          await set(STORE.records, value.records);
+          await updateLast(queue, entry);
+          return Number(queue.batchId.split(":").at(-1));
+        }
+        return { get, set, read, migrate, importEntry, assertBatch, write, updateLast, recheck };
+      }
+      module.exports = { STORE, emptyFiles, validateRecords, validateFiles, createRepository };
     }
-  }
-  const testApi = { VERSION, STORE, DEFAULT_CONFIG, HEADERS, LABELS, LOCK_NAME, norm, validateConfig, renderMessage, validateBuyerAccount, parseBlacklist, itemState, splitCsv, parseSource, readSource, batchId, recordKey, recordState, buildQueue, runnableItems, countsFor, streakWarning, pruneFiles, toCsv, listCsv, filteredExport, pendingExport, sendOne, activateElement };
-  if (typeof module !== "undefined" && module.exports) module.exports = testApi;
-  if (typeof window !== "undefined" && typeof document !== "undefined" && location.hostname === "seller.shopee.tw" && location.pathname.startsWith("/new-webchat/conversations")) init();
+  });
+
+  // src/chat-runtime.cjs
+  var require_chat_runtime = __commonJS({
+    "src/chat-runtime.cjs"(exports, module) {
+      "use strict";
+      var { problem, norm, decimal, safeUid, compareIds, canonical } = require_util();
+      var LOCK_NAME = "shopee-settlement-notice:send";
+      var PANELS = "[data-account-precheck],[data-settlement-notice],[data-winlist-shopee],[data-replay-add-order]";
+      var LIMITS = Object.freeze({ root: 3e4, query: 15e3, page: 15e3, conversation: 1e4, poll: 200 });
+      function visible(el) {
+        if (!el) return false;
+        const style = getComputedStyle(el), r = el.getBoundingClientRect();
+        return style.display !== "none" && style.visibility !== "hidden" && Number(style.opacity) !== 0 && r.width > 0 && r.height > 0;
+      }
+      function safe(stop) {
+        if (stop?.()) throw problem("STOP", "已停止。");
+        if (navigator.onLine === false) throw problem("NETWORK", "目前沒有網路，已停止；請等網路恢復後重跑。");
+        const selectors = ['iframe[src*="captcha" i]', 'iframe[src*="challenge" i]', 'iframe[title*="captcha" i]', '[class*="captcha" i]', '[id*="captcha" i]'];
+        if (selectors.some((s) => [...document.querySelectorAll(s)].some((e) => visible(e) && !e.closest(PANELS)))) throw problem("SECURITY_CHALLENGE", "偵測到拼圖／安全驗證，已停止，請人工處理。");
+        if ([...document.querySelectorAll('[role="dialog"],[class*="modal" i]')].some((e) => visible(e) && !e.closest(PANELS) && /拼圖驗證|完成拼圖|安全驗證|請驗證|captcha|security challenge/iu.test(norm(e.textContent)))) throw problem("SECURITY_CHALLENGE", "偵測到安全驗證，已停止。");
+        const other = document.querySelector('[data-winlist-shopee="1"]')?.shadowRoot?.querySelector("[data-stop]");
+        if (other && !other.classList.contains("wl-hidden") && visible(other)) throw problem("OTHER_SENDER", "明細正在發送，已停止；請先停止明細再操作。");
+      }
+      async function withLock(action) {
+        if (!navigator.locks?.request) throw problem("LOCK", "瀏覽器不支援共用鎖，請使用新版 Chrome／Edge。");
+        return navigator.locks.request(LOCK_NAME, { ifAvailable: true }, (lock) => {
+          if (!lock) throw problem("LOCK", "結單通知、回放或另一個預檢正在執行，請等它完成。");
+          return action();
+        });
+      }
+      async function sleep(ms, stop) {
+        const until = Date.now() + ms;
+        while (Date.now() < until) {
+          safe(stop);
+          await new Promise((r) => setTimeout(r, Math.min(LIMITS.poll, until - Date.now())));
+        }
+      }
+      async function wait(predicate, ms, stop, code = "READ_FAILED", message = "讀取逾時／未讀完，已停止。") {
+        const until = Date.now() + ms;
+        do {
+          safe(stop);
+          const value = predicate();
+          if (value) return value;
+          await new Promise((r) => setTimeout(r, LIMITS.poll));
+        } while (Date.now() < until);
+        safe(stop);
+        throw problem(code, message);
+      }
+      function inputElement() {
+        const entries = [...document.querySelectorAll('input[placeholder*="搜尋"]')].filter((e) => visible(e) && !e.closest(PANELS));
+        if (entries.length !== 1) throw problem("SEARCH_INPUT", "找不到唯一的聊聊搜尋框，已停止；請確認頁面正常。");
+        return entries[0];
+      }
+      function nativeSearchValue(input, text) {
+        if (!document.contains(input) || !visible(input)) throw problem("SEARCH_INPUT", "搜尋框已被替換，已停止。");
+        input.focus();
+        if (document.activeElement !== input) throw problem("FOCUS", "焦點不在搜尋框，已停止。");
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+        if (setter) setter.call(input, text);
+        else input.value = text;
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+      function activate(el) {
+        el.scrollIntoView({ block: "nearest", inline: "nearest" });
+        const r = el.getBoundingClientRect(), clientX = r.left + r.width * 0.5, clientY = r.top + r.height * 0.5, top = document.elementFromPoint(clientX, clientY), target = top && (el.contains(top) || top.contains(el)) ? top : el;
+        const mouse = { bubbles: true, cancelable: true, composed: true, clientX, clientY, button: 0, buttons: 1, detail: 1 }, pointer = { ...mouse, pointerId: 1, pointerType: "mouse", isPrimary: true, width: 1, height: 1, pressure: 0.5 };
+        target.focus?.();
+        const P = typeof PointerEvent === "function" ? PointerEvent : MouseEvent;
+        for (const [name, C, init] of [["pointerover", P, pointer], ["mouseover", MouseEvent, mouse], ["pointerdown", P, pointer], ["mousedown", MouseEvent, mouse], ["pointerup", P, { ...pointer, buttons: 0 }], ["mouseup", MouseEvent, { ...mouse, buttons: 0 }], ["click", MouseEvent, { ...mouse, buttons: 0 }]]) target.dispatchEvent(new C(name, init));
+      }
+      function fiberOf(node) {
+        const key = Object.keys(node || {}).find((k) => k.startsWith("__reactFiber$"));
+        return key ? node[key] : null;
+      }
+      function findStore(input = inputElement()) {
+        let node = input;
+        for (let n = 0; node && n < 12; n++, node = node.parentElement) {
+          let fiber = fiberOf(node);
+          for (let d = 0; fiber && d < 200; d++, fiber = fiber.return) {
+            const p = fiber.memoizedProps, s = p?.store || p?.value?.store;
+            if (s && typeof s.getState === "function" && typeof s.subscribe === "function") {
+              const state = s.getState();
+              if (state && typeof state === "object" && (state.searchReducer || state.entityReducer)) return s;
+            }
+          }
+        }
+        return null;
+      }
+      function object(value) {
+        return value !== null && typeof value === "object" && !Array.isArray(value);
+      }
+      function rootStatus(state, replay = false) {
+        const search = state?.searchReducer;
+        if (search !== void 0 && !object(search)) return "invalid";
+        const sr = search?.searchResult, p = search?.pagination;
+        const required = [sr?.user, p?.user];
+        if (replay) required.push(state?.messageReducer?.messagesRelatedMap, state?.entityReducer, state?.conversationReducer);
+        if (required.some((v) => v === void 0)) return "waiting";
+        if (required.some((v) => !object(v))) return "invalid";
+        if (typeof sr.user.status !== "string" || !Array.isArray(sr.user.results) || typeof p.user.hasMore !== "boolean") return "invalid";
+        return "ready";
+      }
+      function searchFrame(store, branch) {
+        const s = store.getState()?.searchReducer;
+        if (!object(s) || typeof s.keyword !== "string" || !["string", "number"].includes(typeof s.searchFilter)) throw problem("DATA", "搜尋資料格式不符合預期，已停止。");
+        const b = s.searchResult?.[branch], p = s.pagination?.[branch];
+        if (!b) return { keyword: s.keyword, filter: s.searchFilter, branch: null };
+        if (!object(b) || typeof b.status !== "string" || !Array.isArray(b.results) || !object(p) || typeof p.hasMore !== "boolean") throw problem("DATA", "搜尋結果或分頁資料格式不符合預期，已停止。");
+        return { keyword: s.keyword, filter: s.searchFilter, branch: { status: b.status, results: b.results, hasMore: p.hasMore } };
+      }
+      function projectResults(results, branch) {
+        return results.map((r) => {
+          if (!object(r)) throw problem("DATA", "搜尋結果項目格式異常，已停止。");
+          if (branch === "user") {
+            if (typeof r.to_name !== "string" || !r.to_name.trim()) throw problem("DATA", "搜尋結果帳號欄位格式異常，已停止。");
+            return { id: typeof r.id === "string" ? r.id : null, to_name: r.to_name, to_id: typeof r.to_id === "number" ? r.to_id : null, is_blocked: typeof r.is_blocked === "boolean" ? r.is_blocked : null };
+          }
+          return { message_id: r.message_id, message_nano_time: r.message_nano_time, message_time: r.message_time, text: r.text, to_id: r.to_id, to_name: r.to_name, conversation_id: r.conversation_id };
+        });
+      }
+      function classifyUser(results, account) {
+        const exact = results.filter((r2) => r2.to_name === account);
+        if (exact.length === 0) return { status: "searchUnconfirmed", code: "NO_EXACT_MATCH", detail: results.length ? `有 ${results.length} 筆部分相符、沒有完全相同。` : "搜尋結果 0 筆。" };
+        if (exact.length !== 1) return { status: "searchUnconfirmed", code: "AMBIGUOUS", detail: "找到不只一筆完全相同的帳號，請人工核對。" };
+        const r = exact[0];
+        if (!decimal(r.id) || !safeUid(r.to_id) || typeof r.is_blocked !== "boolean") return { status: "searchUnconfirmed", code: "IDENTITY_INVALID", detail: "買家身分或封鎖旗標無法確認，請人工核對。" };
+        return { status: r.is_blocked ? "chatBlocked" : "found", code: r.is_blocked ? "CHAT_BLOCKED" : "FOUND", detail: r.is_blocked ? "本次精確命中，但聊聊已封鎖，整位排除。" : "本次搜尋精確命中、沒封鎖；没有發送訊息。", conversation: r };
+      }
+      var SCOPE_LABELS = { all: ["搜尋全部", "全部"], message: ["搜尋訊息", "訊息"] };
+      var scopeBindings = /* @__PURE__ */ new WeakMap();
+      function nearSearch(node, input) {
+        const a = node.getBoundingClientRect(), b = input.getBoundingClientRect();
+        return a.left <= b.right + 80 && a.right >= b.left - 80 && a.top >= b.top - 50 && a.top <= b.bottom + 400;
+      }
+      function clickOwner(el) {
+        for (let n = el, d = 0; n && d < 4; d++, n = n.parentElement) {
+          if (n.matches('button,[role="button"],[role="option"],[role="menuitem"]')) return n;
+          const f = fiberOf(n);
+          if (typeof f?.memoizedProps?.onClick === "function") return n;
+        }
+        return null;
+      }
+      function scopeText(input) {
+        let node = input.parentElement;
+        for (let d = 0; node && d < 3; d++, node = node.parentElement) {
+          for (const el of node.querySelectorAll('button,[role="button"],[aria-haspopup]')) if (visible(el) && nearSearch(el, input)) {
+            const t = norm(el.textContent);
+            if (Object.values(SCOPE_LABELS).flat().includes(t)) return t;
+          }
+        }
+        return "";
+      }
+      async function ensureScope(mode, stop) {
+        const input = inputElement(), labels = SCOPE_LABELS[mode], store = findStore(input), filter = store?.getState()?.searchReducer?.searchFilter;
+        if (!store || !["string", "number"].includes(typeof filter)) throw problem("SCOPE", "無法核對搜尋範圍資料，已停止。");
+        const bindings = scopeBindings.get(store) || {};
+        if (bindings[mode] === filter || labels.includes(scopeText(input))) {
+          bindings[mode] = filter;
+          scopeBindings.set(store, bindings);
+          return input;
+        }
+        let triggers = [];
+        for (let node = input.parentElement, d = 0; node && d < 3; d++, node = node.parentElement) {
+          triggers = [...node.querySelectorAll('button,[role="button"],[aria-haspopup],svg')].map(clickOwner).filter((e, i, a) => e && a.indexOf(e) === i && visible(e) && nearSearch(e, input));
+          if (triggers.length) break;
+        }
+        const preferred = triggers.filter((e) => e.hasAttribute("aria-haspopup") || /搜尋|範圍|篩選/u.test([e.getAttribute("aria-label"), e.getAttribute("title")].join(" ")));
+        if (preferred.length === 1) triggers = preferred;
+        if (triggers.length !== 1) throw problem("SCOPE", "無法確認搜尋範圍選單，已停止；請人工切到需要的範圍再試。");
+        safe(stop);
+        activate(triggers[0]);
+        const option = await wait(() => {
+          const matches = [...document.querySelectorAll('button,[role="option"],[role="menuitem"],li,span')].filter((e) => visible(e) && !e.closest(PANELS) && nearSearch(e, input) && labels.includes(norm(e.textContent))).map(clickOwner).filter((e, i, a) => e && a.indexOf(e) === i);
+          return matches.length === 1 ? matches[0] : null;
+        }, 3e3, stop, "SCOPE", "搜尋範圍選項無法確認，已停止。");
+        activate(option);
+        await wait(() => labels.includes(scopeText(inputElement())) || !document.contains(option) || !visible(option), 3e3, stop, "SCOPE", "搜尋範圍切換未確認，已停止。");
+        const after = store.getState()?.searchReducer?.searchFilter;
+        if (!["string", "number"].includes(typeof after) || Object.entries(bindings).some(([key, value]) => key !== mode && value === after)) throw problem("SCOPE", "搜尋範圍資料無法區分，已停止。");
+        bindings[mode] = after;
+        scopeBindings.set(store, bindings);
+        return inputElement();
+      }
+      function ownEntityInProps(node, predicate) {
+        let f = fiberOf(node);
+        for (let depth = 0; f && depth < 12; depth++, f = f.return) {
+          const props = f.memoizedProps;
+          const scan = (v, n) => {
+            if (!object(v) || n > 2 || typeof v.getState === "function") return false;
+            if (predicate(v)) return true;
+            return Object.keys(v).filter((k) => !["store", "children", "ref"].includes(k)).some((k) => {
+              const child = v[k];
+              return object(child) && scan(child, n + 1);
+            });
+          };
+          if (scan(props, 0)) return true;
+        }
+        return false;
+      }
+      function columnRoot(input) {
+        const ir = input.getBoundingClientRect();
+        let n = input.parentElement;
+        for (let d = 0; n && d < 10; d++, n = n.parentElement) {
+          const r = n.getBoundingClientRect();
+          if (r.width >= ir.width && r.width <= 700 && r.height >= 180) return n;
+        }
+        throw problem("UI_BINDING", "無法確認左側搜尋清單，已停止。");
+      }
+      function scrollParent(node) {
+        for (let n = node?.parentElement, d = 0; n && d < 12; d++, n = n.parentElement) {
+          const style = getComputedStyle(n);
+          if (/auto|scroll/u.test(style.overflowY) && n.scrollHeight > n.clientHeight + 1) return n;
+        }
+        return null;
+      }
+      function validateSearchMessages(rows) {
+        let previous = null;
+        const seen = /* @__PURE__ */ new Set();
+        for (const r of rows) {
+          if (!decimal(r.message_id) || !decimal(r.conversation_id) || !decimal(r.message_nano_time) || !safeUid(r.to_id) || typeof r.to_name !== "string" || typeof r.text !== "string" || !Number.isSafeInteger(r.message_time) || BigInt(r.message_nano_time) / 1000000000n !== BigInt(r.message_time) || !r.text.normalize("NFKC").includes("回放加單")) throw problem("SEARCH_DATA", "回放搜尋資料與探查條件不同，已停止，不能匯出叫貨檔。");
+          if (seen.has(r.message_id)) throw problem("SEARCH_DATA", "回放搜尋出現重複訊息，已停止。");
+          seen.add(r.message_id);
+          if (previous && (BigInt(r.message_nano_time) > BigInt(previous.message_nano_time) || r.message_nano_time === previous.message_nano_time && compareIds(r.message_id, previous.message_id) > 0)) throw problem("SEARCH_DATA", "回放搜尋排序與預期不同，已停止。");
+          previous = r;
+        }
+        return rows;
+      }
+      function conversationFrame(store, id) {
+        const s = store.getState(), c = s.entityReducer?.conversations?.[id], rel = s.messageReducer?.messagesRelatedMap?.[id];
+        if (s.conversationReducer?.currentConversationId !== id) return null;
+        if (!object(c) || !object(rel)) return null;
+        if (c.id !== void 0 && c.id !== id) throw problem("DATA", "對話編號資料矛盾，已停止。");
+        if (!safeUid(c.to_id) || typeof c.to_name !== "string" || typeof c.is_blocked !== "boolean" || !Array.isArray(rel.all) || typeof rel.hasMoreOlderMessage !== "boolean" || typeof rel.hasMoreLatestMessage !== "boolean") throw problem("DATA", "對話或訊息清單格式異常，已停止。");
+        if (rel.hasMoreLatestMessage) throw problem("LATEST_NOT_LOADED", "這個對話尚未讀到最新一端，已停止；請人工確認後重跑。");
+        const seen = /* @__PURE__ */ new Set(), messages = rel.all.map((mid) => {
+          if (!decimal(mid) || seen.has(mid)) throw problem("DATA", "對話訊息編號重複或格式不正確，已停止。");
+          seen.add(mid);
+          const m = s.entityReducer.messages?.[mid];
+          if (!object(m) || m.id !== mid || m.conversation_id !== id || !decimal(m.created_timestamp_nano) || !Number.isSafeInteger(m.created_timestamp) || BigInt(m.created_timestamp_nano) / 1000000000n !== BigInt(m.created_timestamp) || typeof m.type !== "string") throw problem("DATA", "訊息實體、時間或對話歸屬無法確認，已停止。");
+          if (m.type === "text" && (!safeUid(m.from_id) || typeof m.content?.text !== "string")) throw problem("DATA", "文字訊息的傳送者或內容格式無法確認，已停止。");
+          return { id: m.id, conversation_id: id, nano: m.created_timestamp_nano, seconds: m.created_timestamp, from_id: m.from_id, type: m.type, text: m.type === "text" ? m.content.text : "" };
+        });
+        for (let i = 1; i < messages.length; i++) if (BigInt(messages[i].nano) > BigInt(messages[i - 1].nano) || messages[i].nano === messages[i - 1].nano && compareIds(messages[i].id, messages[i - 1].id) > 0) throw problem("DATA", "對話訊息排序與預期不同，已停止。");
+        return { conversation: { id, to_name: c.to_name, to_id: c.to_id, is_blocked: c.is_blocked }, messages, hasMoreOlder: rel.hasMoreOlderMessage };
+      }
+      function assertCandidateTitlesRead(value, candidate) {
+        if (value.conversation.is_blocked) return;
+        const expected = candidate.titleMessages ?? [{ id: candidate.titleMessageId, nano: candidate.titleNano }];
+        const found = new Map(value.messages.map((message) => [message.id, message]));
+        if (!Array.isArray(expected) || !expected.length || value.conversation.id !== candidate.conversation_id || expected.some((title) => {
+          const message = found.get(title?.id);
+          return !decimal(title?.id) || !decimal(title?.nano) || !message || message.conversation_id !== candidate.conversation_id || message.nano !== title.nano;
+        })) throw problem("TITLE_NOT_READ", "對話沒有讀到與搜尋結果相符的標題訊息（訊息缺少或奈秒時間不同），讀取不完整，已停止。");
+      }
+      function createChatRuntime({ stop = () => false, onStatus = () => {
+      }, limits = {}, allowConversation = false } = {}) {
+        const timing = { ...LIMITS, ...limits };
+        let store = null, searchScroller = null;
+        function currentStore() {
+          const found = findStore();
+          if (!found) throw problem("STORE", "找不到聊聊資料，已停止。");
+          if (store && store !== found) throw problem("STORE_CHANGED", "聊聊資料來源已被替換，已停止；請重跑。");
+          store = found;
+          return store;
+        }
+        async function ready(replay = false) {
+          onStatus("等待聊聊資料準備好…");
+          await wait(() => {
+            let found;
+            try {
+              found = findStore();
+            } catch (e) {
+              if (e.code === "SEARCH_INPUT") return null;
+              throw e;
+            }
+            if (!found) return null;
+            const status = rootStatus(found.getState(), replay);
+            if (status === "invalid") throw problem("DATA", "聊聊資料型別與預期不同，已停止。");
+            if (status !== "ready") return null;
+            store = found;
+            return store;
+          }, timing.root, stop, "NOT_READY", "聊聊資料還沒準備好／讀不到資料，請等頁面載完再試。");
+        }
+        async function query(target, branch = "user", mode = "all") {
+          if (typeof target !== "string" || !target.trim()) throw problem("SEARCH_INPUT", "搜尋關鍵字不能空白。");
+          await ensureScope(mode, stop);
+          const input = inputElement(), s = currentStore(), initial = searchFrame(s, branch), filter = initial.filter;
+          let phase = "clear", complete = null, failure = null, active = true, sawBranch = !!initial.branch, expectedInput = "";
+          const check = () => {
+            if (!active) return;
+            try {
+              safe(stop);
+              if (inputElement() !== input || !document.contains(input)) throw problem("SEARCH_INPUT", "搜尋框被替換，已停止。");
+              if (input.value !== expectedInput) throw problem("SEARCH_UNRELIABLE", "搜尋框內容被改掉，已停止本輪。");
+              const f = searchFrame(currentStore(), branch);
+              if (f.filter !== filter) throw problem("SCOPE", "搜尋範圍中途變動，已停止。");
+              if (!f.branch) {
+                if (sawBranch) throw problem("DATA", "搜尋資料中途消失，已停止。");
+                return;
+              }
+              sawBranch = true;
+              if (phase === "clear") {
+                if (f.keyword === "") phase = "cleared";
+                return;
+              }
+              if (phase === "cleared") return;
+              if (phase === "reset") {
+                if (f.keyword !== "" && f.keyword !== target) throw problem("SEARCH_UNRELIABLE", "搜尋關鍵字被改掉，已停止本輪。");
+                if (f.keyword === target && f.branch.status === "" && f.branch.results.length === 0) phase = "result";
+                return;
+              }
+              if (phase === "result") {
+                if (f.keyword !== target) throw problem("SEARCH_UNRELIABLE", "搜尋關鍵字中途變動，已停止本輪。");
+                if (f.branch.status === "succeed") {
+                  complete = { results: projectResults(f.branch.results, branch), hasMore: f.branch.hasMore, filter };
+                  phase = "complete";
+                }
+              }
+            } catch (e) {
+              failure = e;
+            }
+          };
+          const cancel = s.subscribe(check);
+          if (typeof cancel !== "function") throw problem("STORE", "聊聊資料訂閱不支援取消，已停止。");
+          try {
+            nativeSearchValue(input, "");
+            await wait(() => {
+              check();
+              if (failure) throw failure;
+              return phase === "cleared";
+            }, timing.query, stop, "SEARCH_CLEAR_UNFINISHED", "清空搜尋框未完成，頁面搜尋沒有回應，已停止；本位尚未查詢，沒有記錄結果。");
+            phase = "reset";
+            expectedInput = target;
+            nativeSearchValue(input, target);
+            await wait(() => {
+              check();
+              if (failure) throw failure;
+              return complete;
+            }, timing.query, stop, "SEARCH_UNFINISHED", "未完成搜尋：沒有確認本次重設與完成。");
+            return complete;
+          } finally {
+            active = false;
+            cancel();
+          }
+        }
+        async function collectSearch(startNs) {
+          const q = await query("回放加單", "message", "message");
+          let rows = validateSearchMessages(q.results), filter = q.filter;
+          searchScroller = null;
+          while (q.hasMore !== false && !(rows.length && BigInt(rows.at(-1).message_nano_time) < startNs)) {
+            safe(stop);
+            const input = inputElement();
+            if (!searchScroller) {
+              const ids = new Set(rows.map((r) => r.message_id)), root = columnRoot(input);
+              const nodes = [...root.querySelectorAll("div,li,span")].filter((e) => visible(e) && ownEntityInProps(e, (v) => decimal(v.message_id) && ids.has(v.message_id)));
+              searchScroller = nodes.map(scrollParent).find(Boolean);
+              if (!searchScroller) throw problem("UI_BINDING", "無法確認訊息搜尋清單的捲動區，已停止。");
+            }
+            if (!document.contains(searchScroller)) throw problem("UI_BINDING", "搜尋清單被替換，已停止。");
+            const before = rows.map((r) => canonical(r));
+            searchScroller.scrollTop = searchScroller.scrollHeight;
+            searchScroller.dispatchEvent(new Event("scroll", { bubbles: true }));
+            const next = await wait(() => {
+              const f = searchFrame(currentStore(), "message");
+              if (f.keyword !== "回放加單" || f.filter !== filter || inputElement().value !== "回放加單") throw problem("SEARCH_UNRELIABLE", "搜尋條件中途變動，已停止。");
+              if (!f.branch) return null;
+              if (f.branch.status !== "succeed") return null;
+              const projected = validateSearchMessages(projectResults(f.branch.results, "message"));
+              if (projected.length < before.length || before.some((v, i) => canonical(projected[i]) !== v)) throw problem("SEARCH_DATA", "搜尋結果前面的部分被改掉，已停止。");
+              if (projected.length > before.length || f.branch.hasMore === false) return { results: projected, hasMore: f.branch.hasMore };
+              return null;
+            }, timing.page, stop);
+            rows = next.results;
+            q.hasMore = next.hasMore;
+            onStatus(`已讀 ${rows.length} 筆搜尋結果`);
+          }
+          return rows;
+        }
+        async function openConversation(candidate) {
+          if (!allowConversation) throw problem("FORBIDDEN", "帳號預檢不開對話。");
+          const q = await query(candidate.to_name, "user", "all"), r = classifyUser(q.results, candidate.to_name);
+          if (!r.conversation || r.conversation.id !== candidate.conversation_id || r.conversation.to_id !== candidate.to_id) throw problem("BUYER_BINDING", "候選買家的帳號／對話／UID 無法核對，已停止。");
+          if (r.status === "chatBlocked") return { conversation: r.conversation, messages: [], hasMoreOlder: false };
+          const input = inputElement(), root = columnRoot(input);
+          const nodes = [...root.querySelectorAll("div,li,span,p")].filter((e) => visible(e) && norm(e.textContent) === candidate.to_name && ownEntityInProps(e, (v) => v.id === candidate.conversation_id && v.to_name === candidate.to_name && v.to_id === candidate.to_id));
+          nodes.sort((a, b) => {
+            const x = a.getBoundingClientRect(), y = b.getBoundingClientRect();
+            return x.width * x.height - y.width * y.height;
+          });
+          if (!nodes.length) throw problem("UI_BINDING", "買家結果的畫面元素無法綁定對話，已停止。");
+          activate(nodes[0]);
+          const value = await wait(() => conversationFrame(currentStore(), candidate.conversation_id), timing.conversation, stop, "BUYER_BINDING", "沒有確認進入候選對話，已停止。");
+          if (value.conversation.to_name !== candidate.to_name || value.conversation.to_id !== candidate.to_id) throw problem("BUYER_BINDING", "進入的買家對話不相符，已停止。");
+          return value;
+        }
+        async function readConversation(candidate, startNs) {
+          let frame = await openConversation(candidate);
+          if (frame.conversation.is_blocked) return frame;
+          const collected = /* @__PURE__ */ new Map();
+          let scroller = null;
+          while (true) {
+            safe(stop);
+            for (const m of frame.messages) {
+              const old = collected.get(m.id);
+              if (old && canonical(old) !== canonical(m)) throw problem("DATA", "已讀的訊息內容或時間被改掉，已停止。");
+              collected.set(m.id, m);
+            }
+            const oldest = frame.messages.at(-1);
+            if (frame.hasMoreOlder === false || oldest && BigInt(oldest.nano) < startNs) break;
+            if (!scroller) {
+              const ids = new Set(frame.messages.map((m) => m.id));
+              const nodes = [...document.querySelectorAll('[data-cy="webchat-message-receive"],[data-cy="webchat-message-send"]')].filter((e) => visible(e) && ownEntityInProps(e, (v) => v.conversation_id === candidate.conversation_id && decimal(v.id) && ids.has(v.id)));
+              scroller = nodes.map(scrollParent).find(Boolean);
+              if (!scroller) throw problem("UI_BINDING", "無法確認目標對話的訊息捲動區，已停止。");
+            }
+            if (!document.contains(scroller)) throw problem("UI_BINDING", "訊息捲動區被替換，已停止。");
+            const known = new Set(collected.keys());
+            scroller.scrollTop = 0;
+            scroller.dispatchEvent(new Event("scroll", { bubbles: true }));
+            frame = await wait(() => {
+              const f = conversationFrame(currentStore(), candidate.conversation_id);
+              if (!f) return null;
+              if (f.conversation.to_name !== candidate.to_name || f.conversation.to_id !== candidate.to_id) throw problem("BUYER_BINDING", "對話身分中途變動，已停止。");
+              return f.hasMoreOlder === false || f.messages.some((m) => !known.has(m.id)) ? f : null;
+            }, timing.page, stop);
+            onStatus(`已讀此對話 ${collected.size} 則訊息`);
+          }
+          const value = { conversation: frame.conversation, messages: [...collected.values()], hasMoreOlder: frame.hasMoreOlder };
+          assertCandidateTitlesRead(value, candidate);
+          return value;
+        }
+        async function cleanup() {
+          safe(stop);
+          await ensureScope("all", stop);
+          const input = inputElement();
+          nativeSearchValue(input, "");
+        }
+        return { ready, query, collectSearch, readConversation, cleanup, delay: (ms) => sleep(ms, stop), safe: () => safe(stop) };
+      }
+      module.exports = { LOCK_NAME, LIMITS, PANELS, visible, safe, withLock, sleep, wait, inputElement, nativeSearchValue, activate, findStore, rootStatus, searchFrame, projectResults, classifyUser, ensureScope, validateSearchMessages, conversationFrame, assertCandidateTitlesRead, createChatRuntime };
+    }
+  });
+
+  // src/panel.cjs
+  var require_panel = __commonJS({
+    "src/panel.cjs"(exports, module) {
+      "use strict";
+      var { safeMessage } = require_util();
+      var BASE_CSS = `:host{all:initial;font:14px/1.5 "Microsoft JhengHei",sans-serif;color:#26354b}*{box-sizing:border-box}.panel{position:fixed;width:360px;max-width:calc(100vw - 24px);max-height:78vh;background:#fff;border:1px solid #bac7d8;border-radius:10px;box-shadow:0 6px 28px #0003;z-index:2147483646;overflow:hidden}header{display:flex;justify-content:space-between;align-items:center;padding:10px 12px;cursor:grab;touch-action:none;color:#fff}header button{background:#ffffff22;color:#fff;border:0}.body{padding:12px;max-height:calc(78vh - 44px);overflow:auto}.closed .body,.hidden{display:none}label{display:block;margin:7px 0}textarea,input,select,button{font:inherit}textarea,input:not([type=checkbox]),select{width:100%;padding:6px;border:1px solid #aebccd;border-radius:5px}textarea{min-height:85px;resize:vertical}button{padding:6px 9px;border:1px solid #b6c4d6;border-radius:5px;background:#f5f8fc;cursor:pointer}button:disabled{opacity:.5;cursor:default}.actions{display:flex;gap:6px;flex-wrap:wrap;margin:10px 0}.primary{background:#176e63;color:#fff}.danger{background:#b43030;color:white}.status,.mini,pre{white-space:pre-wrap;overflow-wrap:anywhere}.mini{font-size:12px;color:#596b81}.error{color:#aa2525}pre{max-height:145px;overflow:auto;background:#eef4fa;padding:7px;margin:7px 0}.check{display:flex;gap:7px;align-items:start}.stop{position:sticky;bottom:0;width:100%}`;
+      function mountPanel({ attribute, title, html, colour = "#176e63", position = { left: 18, top: 18 }, gm, positionKey }) {
+        if (document.querySelector(`[${attribute}]`)) return null;
+        const host = document.createElement("div");
+        host.setAttribute(attribute, "1");
+        document.documentElement.append(host);
+        const root = host.attachShadow({ mode: "open" });
+        root.innerHTML = `<style>${BASE_CSS}</style><section class="panel"><header style="background:${colour}"><strong>${title}</strong><button data-collapse>收合</button></header><div class="body">${html}</div></section>`;
+        const $ = (selector) => root.querySelector(selector), panel = $(".panel"), header = $("header");
+        let drag = null;
+        function place(left, top) {
+          const r = panel.getBoundingClientRect();
+          panel.style.left = `${Math.min(Math.max(8, left), Math.max(8, innerWidth - r.width - 8))}px`;
+          panel.style.top = `${Math.min(Math.max(8, top), Math.max(8, innerHeight - Math.min(r.height, 80) - 8))}px`;
+        }
+        const save = () => {
+          const r = panel.getBoundingClientRect();
+          Promise.resolve(gm.set(positionKey, { left: Math.round(r.left), top: Math.round(r.top) })).catch(() => {
+          });
+        };
+        place(position.left, position.top);
+        Promise.resolve(gm.get(positionKey, null)).then((p) => {
+          if (Number.isFinite(p?.left) && Number.isFinite(p?.top)) place(p.left, p.top);
+        }).catch(() => {
+        });
+        function end(e) {
+          if (!drag || e?.pointerId != null && e.pointerId !== drag.id) return;
+          const id = drag.id;
+          drag = null;
+          save();
+          if (header.hasPointerCapture?.(id)) header.releasePointerCapture(id);
+        }
+        header.addEventListener("pointerdown", (e) => {
+          if (e.button !== 0 || e.target.closest("button")) return;
+          const r = panel.getBoundingClientRect();
+          drag = { id: e.pointerId, x: e.clientX - r.left, y: e.clientY - r.top };
+          header.setPointerCapture?.(e.pointerId);
+          e.preventDefault();
+        });
+        header.addEventListener("pointermove", (e) => {
+          if (drag?.id === e.pointerId) place(e.clientX - drag.x, e.clientY - drag.y);
+        });
+        for (const event of ["pointerup", "pointercancel", "lostpointercapture"]) header.addEventListener(event, end);
+        window.addEventListener("blur", () => end());
+        window.addEventListener("resize", () => {
+          const r = panel.getBoundingClientRect();
+          place(r.left, r.top);
+        });
+        $("[data-collapse]").addEventListener("click", () => {
+          panel.classList.toggle("closed");
+          $("[data-collapse]").textContent = panel.classList.contains("closed") ? "展開" : "收合";
+        });
+        const show = (message, error = false) => {
+          const target = $("[data-status]");
+          if (target) {
+            target.textContent = message;
+            target.classList.toggle("error", error);
+          }
+        };
+        const logs = [];
+        const log = (message) => {
+          logs.push(`${(/* @__PURE__ */ new Date()).toLocaleTimeString("zh-TW", { timeZone: "Asia/Taipei" })} ${message}`);
+          if (logs.length > 150) logs.shift();
+          if ($("[data-log]")) $("[data-log]").textContent = logs.join("\n");
+        };
+        function download(content, name) {
+          const url = URL.createObjectURL(new Blob([content], { type: "text/csv;charset=utf-8" })), a = document.createElement("a");
+          a.href = url;
+          a.download = name;
+          document.body.append(a);
+          a.click();
+          a.remove();
+          setTimeout(() => URL.revokeObjectURL(url), 1e3);
+        }
+        if (gm.menu) {
+          gm.menu(`開啟${title}`, () => {
+            panel.classList.remove("closed");
+            $("[data-collapse]").textContent = "收合";
+          });
+          gm.menu(`重設${title}位置`, () => {
+            place(position.left, position.top);
+            save();
+          });
+        }
+        return { host, root, $, panel, show, log, download, fail: (error) => show(safeMessage(error), true) };
+      }
+      function gmAdapter() {
+        return { get: (key, fallback) => typeof GM_getValue === "function" ? GM_getValue(key, fallback) : fallback, set: (key, value) => {
+          if (typeof GM_setValue !== "function") throw new Error("GM storage unavailable");
+          return GM_setValue(key, value);
+        }, menu: typeof GM_registerMenuCommand === "function" ? GM_registerMenuCommand : null };
+      }
+      module.exports = { mountPanel, gmAdapter };
+    }
+  });
+
+  // src/precheck-ui.cjs
+  var require_precheck_ui = __commonJS({
+    "src/precheck-ui.cjs"(exports, module) {
+      "use strict";
+      var core2 = require_precheck_core();
+      var storage2 = require_precheck_storage();
+      var chat2 = require_chat_runtime();
+      var { problem, safeMessage } = require_util();
+      var { mountPanel, gmAdapter } = require_panel();
+      var VERSION = "0.3.1";
+      async function initPrecheck() {
+        const gm = gmAdapter(), ui2 = mountPanel({ attribute: "data-account-precheck", title: `帳號預檢 v${VERSION}（只查、不發）`, position: { left: Math.min(Math.round(innerWidth * 0.28), Math.max(18, innerWidth - 380)), top: 80 }, gm, positionKey: storage2.STORE.panelPosition, html: `
+    <label>直播原始 CSV（一份）<input data-files type="file" accept=".csv"></label><p data-file-list class="mini">請選原始檔，不要選篩選後的檔。</p><p data-resume class="mini"></p>
+    <details><summary>本腳本黑名單</summary><label>每行一個完整帳號<textarea data-blacklist></textarea></label><button data-save-blacklist>儲存黑名單</button><p class="mini">名單只存本腳本；修改後按儲存才生效。</p></details>
+    <label>買家與狀態<select data-preview-select></select></label><p data-source class="mini"></p><div class="actions"><button data-mark-manual>這位人工確認找得到（留）</button><button data-mark-blocked>這位列入黑名單</button></div>
+    <label class="check"><input data-dry type="checkbox" checked><span>演練：前 3 位待查者，只顯示判斷、不寫結果。</span></label><button data-start class="primary">開始演練</button><button data-stop class="danger stop hidden">緊急停止</button>
+    <p data-status class="status">正在準備紀錄…</p><p data-summary class="mini"></p><div class="actions"><button data-export-filtered>匯出預檢通過的直播檔</button><button data-export-pending>匯出待處理直播檔</button><button data-export-list>匯出名單與結果</button></div>
+    <button data-recheck>搜尋未確認的重新查一次</button><details><summary>整份重新查</summary><button data-new-round>這份檔重新全部查一次</button></details><p class="mini">完全不發訊息、不開對話。預檢時不要發明細。待處理檔不能拿來叫貨；後續更新須重新匯出、另建場次。</p><pre data-log></pre>` });
+        if (!ui2) return;
+        const $ = ui2.$, repo = storage2.createRepository(gm);
+        const state = { entry: null, queue: null, round: 0, records: {}, blacklist: [], busy: true, running: false, stop: false, booted: false };
+        function controls() {
+          const disabled = state.busy || state.running || !state.booted;
+          for (const s of ["[data-files]", "[data-save-blacklist]", "[data-start]", "[data-dry]", "[data-blacklist]"]) $(s).disabled = disabled;
+          for (const s of ["[data-export-filtered]", "[data-export-pending]", "[data-export-list]", "[data-new-round]", "[data-recheck]", "[data-preview-select]", "[data-mark-manual]", "[data-mark-blocked]"]) $(s).disabled = disabled || !state.entry;
+          $("[data-recheck]").disabled = disabled || !state.queue?.items.some((i) => ["notFound", "searchUnconfirmed"].includes(core2.itemState(state.queue, state.records, i)));
+          $("[data-start]").disabled = disabled || !state.queue?.items.length;
+          $("[data-stop]").classList.toggle("hidden", !state.running);
+          $("[data-start]").textContent = $("[data-dry]").checked ? "開始演練" : "開始檢查";
+          const account = $("[data-preview-select]").value, item = state.queue?.items.find((i) => i.account === account);
+          if (item) $("[data-mark-manual]").disabled = disabled || ["blocked", "chatBlocked"].includes(core2.itemState(state.queue, state.records, item));
+        }
+        async function render() {
+          if (state.queue) {
+            const value = await repo.read();
+            state.records = value.records;
+            $("[data-summary]").textContent = [core2.summaryText(core2.summary(state.queue, state.records)), core2.streakWarning(state.queue, state.records)].filter(Boolean).join("\n");
+            const selection = $("[data-preview-select]").value;
+            $("[data-preview-select]").replaceChildren(...state.queue.items.map((i) => {
+              const option = document.createElement("option");
+              option.value = i.account;
+              option.textContent = `${i.account}：${core2.displayLabel(state.queue, state.records, i)}`;
+              return option;
+            }));
+            if (state.queue.items.some((i) => i.account === selection)) $("[data-preview-select]").value = selection;
+            const item = state.queue.items.find((i) => i.account === $("[data-preview-select]").value);
+            $("[data-source]").textContent = item ? `原檔 ${item.rowCount} 列；${core2.displayLabel(state.queue, state.records, item)}` : "";
+            $("[data-recheck]").disabled = state.running || state.busy || !state.queue.items.some((i) => ["notFound", "searchUnconfirmed"].includes(core2.itemState(state.queue, state.records, i)));
+          }
+          controls();
+        }
+        async function checkCurrent() {
+          const list = core2.parseBlacklist(await repo.get(storage2.STORE.blacklist, []));
+          if (JSON.stringify(list) !== JSON.stringify(state.blacklist) || JSON.stringify(core2.parseBlacklist($("[data-blacklist]").value)) !== JSON.stringify(list)) throw problem("BLACKLIST_UNSAVED", "黑名單未儲存或已在別的分頁變動，請核對並儲存後再操作。");
+          return repo.assertBatch(state.queue, state.entry.hash);
+        }
+        $("[data-stop]").addEventListener("click", () => {
+          state.stop = true;
+          ui2.show("停止中；不會再查下一位。");
+        });
+        $("[data-dry]").addEventListener("change", controls);
+        $("[data-preview-select]").addEventListener("change", () => render().catch(ui2.fail));
+        $("[data-files]").addEventListener("change", async (e) => {
+          if (state.running || state.busy || !state.booted) return;
+          const file = e.target.files?.[0];
+          if (!file) return;
+          state.busy = true;
+          controls();
+          try {
+            const entry = await core2.readSource(await file.arrayBuffer(), file.name);
+            await chat2.withLock(async () => {
+              const previous = (await repo.read()).files.last;
+              const next = await repo.importEntry(entry);
+              state.entry = entry;
+              state.round = next.round;
+              state.queue = core2.buildQueue(entry, null, next.round, state.blacklist);
+              state.records = next.records;
+              await repo.updateLast(state.queue, entry);
+              $("[data-file-list]").textContent = `${entry.name}：${entry.sourceRows} 資料列、${entry.accounts.length} 位；稽核留言 ${entry.inactiveRows} 列、無帳號 ${entry.emptyAccountRows} 列。`;
+              $("[data-resume]").textContent = "";
+              ui2.show(previous?.name === entry.name && previous.hash !== entry.hash ? "檔名相同但內容不同，這是新的批次，請重新核對。" : "已匯入原檔；內容相同就接續既有進度。");
+            });
+          } catch (error) {
+            ui2.fail(error);
+          } finally {
+            state.busy = false;
+            await render().catch(ui2.fail);
+          }
+        });
+        $("[data-save-blacklist]").addEventListener("click", async () => {
+          if (state.running || state.busy) return;
+          try {
+            await chat2.withLock(async () => {
+              state.blacklist = core2.parseBlacklist($("[data-blacklist]").value);
+              await repo.set(storage2.STORE.blacklist, state.blacklist);
+              $("[data-blacklist]").value = state.blacklist.join("\n");
+              if (state.queue) state.queue.blacklist = state.blacklist;
+              ui2.show(`已儲存 ${state.blacklist.length} 位黑名單。`);
+              await render();
+            });
+          } catch (error) {
+            ui2.fail(error);
+          }
+        });
+        async function selected(manual) {
+          if (state.running || state.busy || !state.queue) return;
+          const item = state.queue.items.find((i) => i.account === $("[data-preview-select]").value);
+          if (!item) return;
+          try {
+            await chat2.withLock(async () => {
+              const { records } = await checkCurrent();
+              if (["blocked", "chatBlocked"].includes(core2.itemState(state.queue, records, item)) && manual) throw problem("BLOCKED", "此人已排除，不能用人工確認放回叫貨檔。");
+              const prompt = manual ? `你已人工核對本批帳號 ${item.account} 找得到、沒有封鎖？
+只記人工確認，不代表明細送達，也不發訊息。` : `將 ${item.account} 列入本腳本黑名單？此人的全部原始列會從叫貨檔及待處理檔排除。`;
+              if (!confirm(prompt)) return;
+              if (manual) await repo.write(state.queue, state.entry, item, "manualSent", "MANUAL_FOUND", "人工確認本批帳號找得到");
+              else {
+                state.blacklist = core2.parseBlacklist([...state.blacklist, item.account]);
+                state.queue.blacklist = state.blacklist;
+                await repo.set(storage2.STORE.blacklist, state.blacklist);
+                $("[data-blacklist]").value = state.blacklist.join("\n");
+              }
+              await render();
+            });
+          } catch (error) {
+            ui2.fail(error);
+          }
+        }
+        $("[data-mark-manual]").addEventListener("click", () => selected(true));
+        $("[data-mark-blocked]").addEventListener("click", () => selected(false));
+        for (const [selector, kind] of [["[data-export-filtered]", "passed"], ["[data-export-pending]", "pending"], ["[data-export-list]", "list"]]) $(selector).addEventListener("click", async () => {
+          if (state.running || state.busy || !state.entry) return;
+          try {
+            await chat2.withLock(async () => {
+              const { records } = await checkCurrent();
+              if (kind === "list") {
+                ui2.download(core2.listCsv(state.queue, records), state.entry.name.replace(/\.csv$/iu, "") + "_預檢結果.csv");
+                return;
+              }
+              const result = kind === "pending" ? core2.pendingExport(state.entry, state.queue, records) : core2.filteredExport(state.entry, state.queue, records);
+              if (confirm(result.confirmation)) ui2.download(result.bytes, result.filename);
+            });
+          } catch (error) {
+            ui2.fail(error);
+          }
+        });
+        async function reset(all) {
+          if (state.running || state.busy || !state.entry) return;
+          try {
+            await chat2.withLock(async () => {
+              await checkCurrent();
+              if (!confirm(all ? "本檔全部重新搜尋一次，不發訊息；黑名單仍排除。確定？" : "把搜尋未確認的人改回待查？不會自己開始，之後請再按開始。")) return;
+              state.round = await repo.recheck(state.queue, state.entry, all);
+              state.queue = core2.buildQueue(state.entry, null, state.round, state.blacklist);
+              await render();
+              ui2.show("已重設，請再按開始。");
+            });
+          } catch (error) {
+            ui2.fail(error);
+          }
+        }
+        $("[data-recheck]").addEventListener("click", () => reset(false));
+        $("[data-new-round]").addEventListener("click", () => reset(true));
+        $("[data-start]").addEventListener("click", async () => {
+          if (state.running || state.busy || !state.queue?.items.length) return;
+          state.running = true;
+          state.stop = false;
+          controls();
+          try {
+            await chat2.withLock(async () => {
+              const { records } = await checkCurrent(), dry = $("[data-dry]").checked, all = core2.runnableItems(state.queue, records), items = dry ? all.slice(0, 3) : all;
+              if (!items.length) {
+                ui2.show("沒有待查者；搜尋未確認需手動重查。");
+                return;
+              }
+              const runtime = chat2.createChatRuntime({ stop: () => state.stop, onStatus: ui2.show, allowConversation: false });
+              await runtime.ready(false);
+              for (let index = 0; index < items.length; index++) {
+                runtime.safe();
+                const current = await checkCurrent(), item = items[index];
+                if (!core2.RETRYABLE.includes(core2.itemState(state.queue, current.records, item))) continue;
+                ui2.show(`${dry ? "演練" : "檢查"} ${index + 1}／${items.length}：${item.account}`);
+                let result;
+                try {
+                  const q = await runtime.query(item.account, "user", "all");
+                  result = chat2.classifyUser(q.results, item.account);
+                } catch (error) {
+                  if (error.code !== "SEARCH_UNFINISHED") throw error;
+                  result = { status: "searchUnconfirmed", code: error.code, detail: "未完成搜尋：沒有看到本次重設與完成，請人工核對後手動重查。" };
+                }
+                if (!dry) await repo.write(state.queue, state.entry, item, result.status, result.code, result.detail);
+                ui2.log(`${item.account}：${result.status === "found" ? "找得到，留" : result.status === "chatBlocked" ? "聊聊已封鎖，排除" : "搜尋未確認"}${dry ? "（演練，不寫結果）" : ""}`);
+                await render();
+                if (index < items.length - 1) await runtime.delay(dry ? 500 : 2e3 + Math.floor(Math.random() * 2001));
+              }
+              await runtime.cleanup();
+              ui2.show(dry ? "演練完成，沒有寫檢查結果；請核對後取消演練再正式查。" : "本次檢查完成，請核對摘要並匯出。");
+            });
+          } catch (error) {
+            ui2.fail(error);
+          } finally {
+            state.running = false;
+            await render().catch(ui2.fail);
+          }
+        });
+        controls();
+        try {
+          await chat2.withLock(() => repo.migrate());
+          state.blacklist = core2.parseBlacklist(await repo.get(storage2.STORE.blacklist, []));
+          $("[data-blacklist]").value = state.blacklist.join("\n");
+          const last = (await repo.read()).files.last;
+          if (last) $("[data-resume]").textContent = last.progressVersion === 2 ? `上次 ${last.name} 已查 ${last.completed}／${last.total} 位。重新選同一份原檔會接著查。` : `上次原檔：${last.name}。這是舊版進度，重新匯入後由本版核對待查者。`;
+          state.booted = true;
+          ui2.show("紀錄準備好了；本版只搜尋，不發訊息、不開對話。");
+        } catch (error) {
+          ui2.fail(error);
+        } finally {
+          state.busy = false;
+          controls();
+        }
+        return { state, repo, ui: ui2 };
+      }
+      module.exports = { VERSION, initPrecheck };
+    }
+  });
+
+  // src/entry-precheck.mjs
+  var import_precheck_core = __toESM(require_precheck_core(), 1);
+  var import_precheck_storage = __toESM(require_precheck_storage(), 1);
+  var import_chat_runtime = __toESM(require_chat_runtime(), 1);
+  var import_precheck_ui = __toESM(require_precheck_ui(), 1);
+  var API = { ...import_precheck_core.default, ...import_precheck_storage.default, chat: import_chat_runtime.default, VERSION: import_precheck_ui.default.VERSION, init: import_precheck_ui.default.initPrecheck };
+  if (typeof window === "undefined") globalThis.__SHOPEE_CANDIDATE_NODE__ = API;
+  else import_precheck_ui.default.initPrecheck().catch(() => {
+  });
 })();
+if(typeof window==='undefined'&&typeof module==='object'&&module.exports){module.exports=globalThis.__SHOPEE_CANDIDATE_NODE__;delete globalThis.__SHOPEE_CANDIDATE_NODE__;}
