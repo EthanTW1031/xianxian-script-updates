@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jambo 商品庫存
 // @namespace    https://jambolive.tv/
-// @version      2.1.0
+// @version      2.1.1
 // @description  獨立匯出含圖片、成本價與直購價的商品庫存及五欄商品清單 XLSX
 // @match        https://jambolive.tv/console/commodity/*
 // @require      https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js
@@ -184,6 +184,9 @@
     'XXL',
     '2XL',
     'XL',
+    'XX',
+    'XS',
+    '3L',
     'FREE',
     'F',
     'L',
