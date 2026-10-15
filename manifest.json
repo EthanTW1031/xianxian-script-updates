@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "publishedAt": "2026-10-15T01:32:39.052Z",
+  "publishedAt": "2026-10-15T02:35:13.873Z",
   "scripts": [
     {
       "id": "fb-inbox-finder",
@@ -43,34 +43,14 @@
       "updatedAt": "2026-10-15T01:32:39.052Z"
     },
     {
-      "id": "script-21a05682a55d21745ec7",
-      "name": "Shopee 回放加單",
-      "namespace": "local.shopee.replay-add-order",
-      "version": "0.1.2",
-      "file": "scripts/script-21a05682a55d21745ec7.user.js",
-      "sha256": "e0c1c5cbb03d1663c8c351893773d358e3381924be818811118023a1a3f0c025",
-      "bytes": 1088016,
-      "updatedAt": "2026-10-15T01:32:39.052Z"
-    },
-    {
-      "id": "script-dd8913dd06efeda6f0e9",
+      "id": "shopee-account-precheck",
       "name": "Shopee 帳號預檢",
       "namespace": "local.shopee.account-precheck",
       "version": "0.3.1",
-      "file": "scripts/script-dd8913dd06efeda6f0e9.user.js",
+      "file": "scripts/shopee-account-precheck.user.js",
       "sha256": "fae4c59be919b1f705f7bed067fea90a26f0710762e6bf3c63e30c9c407301cb",
       "bytes": 79488,
-      "updatedAt": "2026-10-14T15:32:13.348Z"
-    },
-    {
-      "id": "script-f44d30c00e62591c857f",
-      "name": "Shopee 多場結單通知",
-      "namespace": "local.shopee.settlement-notice",
-      "version": "0.2.0",
-      "file": "scripts/script-f44d30c00e62591c857f.user.js",
-      "sha256": "e2fa0c8539024e329e6149f551518d477f72989b38d07ca28e01fc962afbe846",
-      "bytes": 46495,
-      "updatedAt": "2026-10-11T04:39:08.424Z"
+      "updatedAt": "2026-10-15T02:35:13.873Z"
     },
     {
       "id": "shopee-auto-detail-reply",
@@ -91,6 +71,26 @@
       "sha256": "ce1495540dbd3e38d54ea584f19c2f424ef9f9f30536c61cb9914edb26ec5eaf",
       "bytes": 258680,
       "updatedAt": "2026-10-11T14:47:12.944Z"
+    },
+    {
+      "id": "shopee-replay-add-order",
+      "name": "Shopee 回放加單",
+      "namespace": "local.shopee.replay-add-order",
+      "version": "0.1.2",
+      "file": "scripts/shopee-replay-add-order.user.js",
+      "sha256": "e0c1c5cbb03d1663c8c351893773d358e3381924be818811118023a1a3f0c025",
+      "bytes": 1088016,
+      "updatedAt": "2026-10-15T02:35:13.873Z"
+    },
+    {
+      "id": "shopee-settlement-notice",
+      "name": "Shopee 多場結單通知",
+      "namespace": "local.shopee.settlement-notice",
+      "version": "0.2.0",
+      "file": "scripts/shopee-settlement-notice.user.js",
+      "sha256": "e2fa0c8539024e329e6149f551518d477f72989b38d07ca28e01fc962afbe846",
+      "bytes": 46495,
+      "updatedAt": "2026-10-15T02:35:13.873Z"
     }
   ]
 }
