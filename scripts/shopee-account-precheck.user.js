@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee 帳號預檢
 // @namespace    local.shopee.account-precheck
-// @version      0.3.1
+// @version      0.3.2
 // @description  只搜尋帳號與封鎖旗標，不發訊息；無損分開匯出預檢通過與待處理 CSV
 // @match        https://seller.shopee.tw/new-webchat/conversations*
 // @grant        GM_getValue
@@ -11,7 +11,8 @@
 // ==/UserScript==
 
 // Isolated candidate; Ethan authorized implementation on 2026-10-14.
-// Requirements v0.7. No production backfill/publication in this stage.
+// Requirements v0.7.
+// 0.3.2 (2026-10-16): search-scope menu options on the real chat page are div elements; Ethan asked Claude to fix directly.
 
 (() => {
   var __create = Object.create;
@@ -401,7 +402,7 @@
       var { problem, norm, decimal, safeUid, compareIds, canonical } = require_util();
       var LOCK_NAME = "shopee-settlement-notice:send";
       var PANELS = "[data-account-precheck],[data-settlement-notice],[data-winlist-shopee],[data-replay-add-order]";
-      var LIMITS = Object.freeze({ root: 3e4, query: 15e3, page: 15e3, conversation: 1e4, poll: 200 });
+      var LIMITS = Object.freeze({ root: 3e4, query: 15e3, page: 15e3, conversation: 1e4, scope: 2e4, poll: 200 });
       function visible(el) {
         if (!el) return false;
         const style = getComputedStyle(el), r = el.getBoundingClientRect();
@@ -523,6 +524,10 @@
         return { status: r.is_blocked ? "chatBlocked" : "found", code: r.is_blocked ? "CHAT_BLOCKED" : "FOUND", detail: r.is_blocked ? "本次精確命中，但聊聊已封鎖，整位排除。" : "本次搜尋精確命中、沒封鎖；没有發送訊息。", conversation: r };
       }
       var SCOPE_LABELS = { all: ["搜尋全部", "全部"], message: ["搜尋訊息", "訊息"] };
+      var SCOPE_MENU_LABELS = ["搜尋全部", "搜尋買家", "搜尋訊息", "搜尋訂單"];
+      function inScopeMenu(option) {
+        return [...option.parentElement?.children || []].some((s) => s !== option && visible(s) && SCOPE_MENU_LABELS.includes(norm(s.textContent)));
+      }
       var scopeBindings = /* @__PURE__ */ new WeakMap();
       function nearSearch(node, input) {
         const a = node.getBoundingClientRect(), b = input.getBoundingClientRect();
@@ -555,22 +560,27 @@
           scopeBindings.set(store, bindings);
           return input;
         }
-        let triggers = [];
-        for (let node = input.parentElement, d = 0; node && d < 3; d++, node = node.parentElement) {
-          triggers = [...node.querySelectorAll('button,[role="button"],[aria-haspopup],svg')].map(clickOwner).filter((e, i, a) => e && a.indexOf(e) === i && visible(e) && nearSearch(e, input));
-          if (triggers.length) break;
-        }
-        const preferred = triggers.filter((e) => e.hasAttribute("aria-haspopup") || /搜尋|範圍|篩選/u.test([e.getAttribute("aria-label"), e.getAttribute("title")].join(" ")));
-        if (preferred.length === 1) triggers = preferred;
-        if (triggers.length !== 1) throw problem("SCOPE", "無法確認搜尋範圍選單，已停止；請人工切到需要的範圍再試。");
-        safe(stop);
-        activate(triggers[0]);
-        const option = await wait(() => {
-          const matches = [...document.querySelectorAll('button,[role="option"],[role="menuitem"],li,span')].filter((e) => visible(e) && !e.closest(PANELS) && nearSearch(e, input) && labels.includes(norm(e.textContent))).map(clickOwner).filter((e, i, a) => e && a.indexOf(e) === i);
+        const findOption = () => {
+          const matches = [...document.querySelectorAll('button,[role="option"],[role="menuitem"],li,span,div')].filter((e) => visible(e) && !e.closest(PANELS) && nearSearch(e, input) && labels.includes(norm(e.textContent))).map(clickOwner).filter((e, i, a) => e && a.indexOf(e) === i && inScopeMenu(e));
           return matches.length === 1 ? matches[0] : null;
-        }, 3e3, stop, "SCOPE", "搜尋範圍選項無法確認，已停止。");
+        };
+        let option = findOption();
+        if (!option) {
+          let triggers = [];
+          for (let node = input.parentElement, d = 0; node && d < 3; d++, node = node.parentElement) {
+            triggers = [...node.querySelectorAll('button,[role="button"],[aria-haspopup],svg')].map(clickOwner).filter((e, i, a) => e && a.indexOf(e) === i && visible(e) && nearSearch(e, input));
+            if (triggers.length) break;
+          }
+          const preferred = triggers.filter((e) => e.hasAttribute("aria-haspopup") || /搜尋|範圍|篩選/u.test([e.getAttribute("aria-label"), e.getAttribute("title")].join(" ")));
+          if (preferred.length === 1) triggers = preferred;
+          if (triggers.length !== 1) throw problem("SCOPE", "無法確認搜尋範圍選單，已停止；請人工切到需要的範圍再試。");
+          safe(stop);
+          activate(triggers[0]);
+          option = await wait(findOption, LIMITS.scope, stop, "SCOPE", "搜尋範圍選項無法確認，已停止。");
+        }
+        safe(stop);
         activate(option);
-        await wait(() => labels.includes(scopeText(inputElement())) || !document.contains(option) || !visible(option), 3e3, stop, "SCOPE", "搜尋範圍切換未確認，已停止。");
+        await wait(() => labels.includes(scopeText(inputElement())) || !document.contains(option) || !visible(option), LIMITS.scope, stop, "SCOPE", "搜尋範圍切換未確認，已停止。");
         const after = store.getState()?.searchReducer?.searchFilter;
         if (!["string", "number"].includes(typeof after) || Object.entries(bindings).some(([key, value]) => key !== mode && value === after)) throw problem("SCOPE", "搜尋範圍資料無法區分，已停止。");
         bindings[mode] = after;
@@ -947,7 +957,7 @@
       var chat2 = require_chat_runtime();
       var { problem, safeMessage } = require_util();
       var { mountPanel, gmAdapter } = require_panel();
-      var VERSION = "0.3.1";
+      var VERSION = "0.3.2";
       async function initPrecheck() {
         const gm = gmAdapter(), ui2 = mountPanel({ attribute: "data-account-precheck", title: `帳號預檢 v${VERSION}（只查、不發）`, position: { left: Math.min(Math.round(innerWidth * 0.28), Math.max(18, innerWidth - 380)), top: 80 }, gm, positionKey: storage2.STORE.panelPosition, html: `
     <label>直播原始 CSV（一份）<input data-files type="file" accept=".csv"></label><p data-file-list class="mini">請選原始檔，不要選篩選後的檔。</p><p data-resume class="mini"></p>

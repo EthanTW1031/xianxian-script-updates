@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee 回放加單
 // @namespace    local.shopee.replay-add-order
-// @version      0.1.2
+// @version      0.1.3
 // @description  只讀聊聊回放加單，使用直播解析器，選 JAMBO 匯出檔讀商品清單，輸出獨立回放 CSV 與核對清單
 // @match        https://seller.shopee.tw/new-webchat/conversations*
 // @grant        GM_getValue
@@ -11,7 +11,8 @@
 // ==/UserScript==
 
 // Candidate 0.1.2: product list is read from the JAMBO export (.xlsx); Ethan asked Claude to implement on 2026-10-15.
-// Requirements: 回放加單選JAMBO檔與庫存腳本認XX v0.1 (+ GPT reply v0.1). No production backfill/publication in this stage.
+// Requirements: 回放加單選JAMBO檔與庫存腳本認XX v0.1 (+ GPT reply v0.1).
+// 0.1.3 (2026-10-16): search-scope menu options on the real chat page are div elements; Ethan asked Claude to fix directly.
 /* ===== BEGIN ExcelJS 4.4.0 (MIT License, https://github.com/exceljs/exceljs) — verbatim dist/exceljs.min.js, sha256 7e49da68588e250dbb8bba190d2caa8ab3787cc0284bda1d8b2f805c4df742c9 ===== */
 const __REPLAY_EXCELJS__=(function(){var module={exports:{}},exports=module.exports,define;
 /*! ExcelJS 19-10-2023 */
@@ -377,7 +378,7 @@ return module.exports;}).call(globalThis);
       var { problem, norm, decimal, safeUid, compareIds, canonical } = require_util();
       var LOCK_NAME = "shopee-settlement-notice:send";
       var PANELS = "[data-account-precheck],[data-settlement-notice],[data-winlist-shopee],[data-replay-add-order]";
-      var LIMITS = Object.freeze({ root: 3e4, query: 15e3, page: 15e3, conversation: 1e4, poll: 200 });
+      var LIMITS = Object.freeze({ root: 3e4, query: 15e3, page: 15e3, conversation: 1e4, scope: 2e4, poll: 200 });
       function visible(el) {
         if (!el) return false;
         const style = getComputedStyle(el), r = el.getBoundingClientRect();
@@ -499,6 +500,10 @@ return module.exports;}).call(globalThis);
         return { status: r.is_blocked ? "chatBlocked" : "found", code: r.is_blocked ? "CHAT_BLOCKED" : "FOUND", detail: r.is_blocked ? "本次精確命中，但聊聊已封鎖，整位排除。" : "本次搜尋精確命中、沒封鎖；没有發送訊息。", conversation: r };
       }
       var SCOPE_LABELS = { all: ["搜尋全部", "全部"], message: ["搜尋訊息", "訊息"] };
+      var SCOPE_MENU_LABELS = ["搜尋全部", "搜尋買家", "搜尋訊息", "搜尋訂單"];
+      function inScopeMenu(option) {
+        return [...option.parentElement?.children || []].some((s) => s !== option && visible(s) && SCOPE_MENU_LABELS.includes(norm(s.textContent)));
+      }
       var scopeBindings = /* @__PURE__ */ new WeakMap();
       function nearSearch(node, input) {
         const a = node.getBoundingClientRect(), b = input.getBoundingClientRect();
@@ -531,22 +536,27 @@ return module.exports;}).call(globalThis);
           scopeBindings.set(store, bindings);
           return input;
         }
-        let triggers = [];
-        for (let node = input.parentElement, d = 0; node && d < 3; d++, node = node.parentElement) {
-          triggers = [...node.querySelectorAll('button,[role="button"],[aria-haspopup],svg')].map(clickOwner).filter((e, i, a) => e && a.indexOf(e) === i && visible(e) && nearSearch(e, input));
-          if (triggers.length) break;
-        }
-        const preferred = triggers.filter((e) => e.hasAttribute("aria-haspopup") || /搜尋|範圍|篩選/u.test([e.getAttribute("aria-label"), e.getAttribute("title")].join(" ")));
-        if (preferred.length === 1) triggers = preferred;
-        if (triggers.length !== 1) throw problem("SCOPE", "無法確認搜尋範圍選單，已停止；請人工切到需要的範圍再試。");
-        safe(stop);
-        activate(triggers[0]);
-        const option = await wait(() => {
-          const matches = [...document.querySelectorAll('button,[role="option"],[role="menuitem"],li,span')].filter((e) => visible(e) && !e.closest(PANELS) && nearSearch(e, input) && labels.includes(norm(e.textContent))).map(clickOwner).filter((e, i, a) => e && a.indexOf(e) === i);
+        const findOption = () => {
+          const matches = [...document.querySelectorAll('button,[role="option"],[role="menuitem"],li,span,div')].filter((e) => visible(e) && !e.closest(PANELS) && nearSearch(e, input) && labels.includes(norm(e.textContent))).map(clickOwner).filter((e, i, a) => e && a.indexOf(e) === i && inScopeMenu(e));
           return matches.length === 1 ? matches[0] : null;
-        }, 3e3, stop, "SCOPE", "搜尋範圍選項無法確認，已停止。");
+        };
+        let option = findOption();
+        if (!option) {
+          let triggers = [];
+          for (let node = input.parentElement, d = 0; node && d < 3; d++, node = node.parentElement) {
+            triggers = [...node.querySelectorAll('button,[role="button"],[aria-haspopup],svg')].map(clickOwner).filter((e, i, a) => e && a.indexOf(e) === i && visible(e) && nearSearch(e, input));
+            if (triggers.length) break;
+          }
+          const preferred = triggers.filter((e) => e.hasAttribute("aria-haspopup") || /搜尋|範圍|篩選/u.test([e.getAttribute("aria-label"), e.getAttribute("title")].join(" ")));
+          if (preferred.length === 1) triggers = preferred;
+          if (triggers.length !== 1) throw problem("SCOPE", "無法確認搜尋範圍選單，已停止；請人工切到需要的範圍再試。");
+          safe(stop);
+          activate(triggers[0]);
+          option = await wait(findOption, LIMITS.scope, stop, "SCOPE", "搜尋範圍選項無法確認，已停止。");
+        }
+        safe(stop);
         activate(option);
-        await wait(() => labels.includes(scopeText(inputElement())) || !document.contains(option) || !visible(option), 3e3, stop, "SCOPE", "搜尋範圍切換未確認，已停止。");
+        await wait(() => labels.includes(scopeText(inputElement())) || !document.contains(option) || !visible(option), LIMITS.scope, stop, "SCOPE", "搜尋範圍切換未確認，已停止。");
         const after = store.getState()?.searchReducer?.searchFilter;
         if (!["string", "number"].includes(typeof after) || Object.entries(bindings).some(([key, value]) => key !== mode && value === after)) throw problem("SCOPE", "搜尋範圍資料無法區分，已停止。");
         bindings[mode] = after;
@@ -1037,7 +1047,7 @@ ${lines.join("\n")}`;
       var chat2 = require_chat_runtime();
       var { problem, safeMessage } = require_util();
       var { mountPanel, gmAdapter } = require_panel();
-      var VERSION = "0.1.2";
+      var VERSION = "0.1.3";
       var STORE = Object.freeze({ config: "replay:config:v1", panelPosition: "replay:panel-position:v1" });
       async function initReplay(core2, jambo2) {
         const gm = gmAdapter(), ui2 = mountPanel({ attribute: "data-replay-add-order", title: `回放加單 v${VERSION}（只讀）`, colour: "#86501a", position: { left: Math.min(Math.round(innerWidth * 0.55), Math.max(18, innerWidth - 380)), top: 80 }, gm, positionKey: STORE.panelPosition, html: `
