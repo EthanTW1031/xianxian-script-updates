@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee 回放加單
 // @namespace    local.shopee.replay-add-order
-// @version      0.1.4
+// @version      0.1.5
 // @description  只讀聊聊回放加單，使用直播解析器，選 JAMBO 匯出檔讀商品清單，輸出獨立回放 CSV 與核對清單
 // @match        https://seller.shopee.tw/new-webchat/conversations*
 // @grant        GM_getValue
@@ -528,15 +528,25 @@ return module.exports;}).call(globalThis);
         }
         return "";
       }
+      function scopeLabel(input) {
+        return scopeText(input) || norm(input.placeholder);
+      }
+      function validFilter(value) {
+        return ["string", "number"].includes(typeof value);
+      }
+      function scopeMenuItems() {
+        return [...document.querySelectorAll('button,[role="option"],[role="menuitem"],li,span,div')].filter((e) => visible(e) && !e.closest(PANELS) && SCOPE_MENU_LABELS.includes(norm(e.textContent))).map(clickOwner).filter((e, i, a) => e && a.indexOf(e) === i && inScopeMenu(e));
+      }
       async function ensureScope(mode, stop) {
         const input = inputElement(), labels = SCOPE_LABELS[mode], store = findStore(input), filter = store?.getState()?.searchReducer?.searchFilter;
-        if (!store || !["string", "number"].includes(typeof filter)) throw problem("SCOPE", "無法核對搜尋範圍資料，已停止。");
-        const bindings = scopeBindings.get(store) || {};
-        if (bindings[mode] === filter || labels.includes(scopeText(input))) {
+        if (!store || !validFilter(filter)) throw problem("SCOPE", "無法核對搜尋範圍資料，已停止。");
+        const bindings = scopeBindings.get(store) || {}, boundElsewhere = (value) => Object.entries(bindings).some(([key, v]) => key !== mode && v === value);
+        if (bindings[mode] === filter || labels.includes(scopeText(input)) && !boundElsewhere(filter)) {
           bindings[mode] = filter;
           scopeBindings.set(store, bindings);
           return input;
         }
+        const expectChange = !labels.includes(scopeLabel(input)) || boundElsewhere(filter) || bindings[mode] !== void 0 && bindings[mode] !== filter;
         const findOption = () => {
           const matches = [...document.querySelectorAll('button,[role="option"],[role="menuitem"],li,span,div')].filter((e) => visible(e) && !e.closest(PANELS) && nearSearch(e, input) && labels.includes(norm(e.textContent))).map(clickOwner).filter((e, i, a) => e && a.indexOf(e) === i && inScopeMenu(e));
           return matches.length === 1 ? matches[0] : null;
@@ -557,9 +567,26 @@ return module.exports;}).call(globalThis);
         }
         safe(stop);
         activate(option);
-        await wait(() => labels.includes(scopeText(inputElement())) || !document.contains(option) || !visible(option), LIMITS.scope, stop, "SCOPE", "搜尋範圍切換未確認，已停止。");
-        const after = store.getState()?.searchReducer?.searchFilter;
-        if (!["string", "number"].includes(typeof after) || Object.entries(bindings).some(([key, value]) => key !== mode && value === after)) throw problem("SCOPE", "搜尋範圍資料無法區分，已停止。");
+        const settled = () => {
+          if (scopeMenuItems().length) return null;
+          const now = store.getState()?.searchReducer?.searchFilter;
+          if (!validFilter(now)) throw problem("SCOPE", "無法核對搜尋範圍資料，已停止。");
+          if (boundElsewhere(now) || bindings[mode] !== void 0 && bindings[mode] !== now) return null;
+          if (expectChange) {
+            if (now === filter) return null;
+          } else {
+            let current;
+            try {
+              current = inputElement();
+            } catch (error) {
+              if (error.code === "SEARCH_INPUT") return null;
+              throw error;
+            }
+            if (!labels.includes(scopeLabel(current))) return null;
+          }
+          return { value: now };
+        };
+        const after = (await wait(settled, LIMITS.scope, stop, "SCOPE", "搜尋範圍切換未確認（選單沒收起，或頁面的範圍一直沒換過去），已停止。")).value;
         bindings[mode] = after;
         scopeBindings.set(store, bindings);
         return inputElement();
@@ -1048,7 +1075,7 @@ ${lines.join("\n")}`;
       var chat2 = require_chat_runtime();
       var { problem, safeMessage } = require_util();
       var { mountPanel, gmAdapter } = require_panel();
-      var VERSION = "0.1.4";
+      var VERSION = "0.1.5";
       var STORE = Object.freeze({ config: "replay:config:v1", panelPosition: "replay:panel-position:v1" });
       async function initReplay(core2, jambo2) {
         const gm = gmAdapter(), ui2 = mountPanel({ attribute: "data-replay-add-order", title: `回放加單 v${VERSION}（只讀）`, colour: "#86501a", position: { left: Math.min(Math.round(innerWidth * 0.55), Math.max(18, innerWidth - 380)), top: 80 }, gm, positionKey: STORE.panelPosition, html: `
@@ -1204,9 +1231,19 @@ ${config.codes.length} 個商品（${config.codes[0]}～${config.codes.at(-1)}�
               }
               runtime.safe();
               state.result = core2.build(state.conversations, config, { complete: true });
-              await runtime.cleanup();
+              let cleanupError = null;
+              try {
+                await runtime.cleanup();
+              } catch (error) {
+                if (error.code === "STOP") throw error;
+                cleanupError = error;
+              }
               showSummary(state.result);
-              ui2.show(state.result.canExport ? "讀取完成，請核對清單後匯出回放訂單檔。" : "這次沒有可交給控貨助手處理的正數量訂單列，只匯出核對清單。");
+              const done = state.result.canExport ? "讀取完成，請核對清單後匯出回放訂單檔。" : "這次沒有可交給控貨助手處理的正數量訂單列，只匯出核對清單。";
+              if (cleanupError) {
+                ui2.log(`讀取已完成；最後切回「搜尋全部」沒有完成：${safeMessage(cleanupError)}`);
+                ui2.show(`${done}但聊聊沒有切回「搜尋全部」（${safeMessage(cleanupError)}），這不影響讀到的資料。請自己點搜尋框左邊的放大鏡選單切回「搜尋全部」、清空搜尋框，再做明細或帳號預檢。`, true);
+              } else ui2.show(done);
             });
           } catch (error) {
             state.result = state.result ? { ...state.result, complete: false, canExport: false } : core2.build([], config, { complete: false });

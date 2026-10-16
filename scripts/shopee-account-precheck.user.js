@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee 帳號預檢
 // @namespace    local.shopee.account-precheck
-// @version      0.3.3
+// @version      0.3.4
 // @description  搜尋帳號與封鎖旗標，不發訊息；搜尋結果沒有封鎖欄位時才點進對話看封鎖；無損分開匯出預檢通過與待處理 CSV
 // @match        https://seller.shopee.tw/new-webchat/conversations*
 // @grant        GM_getValue
@@ -552,15 +552,25 @@
         }
         return "";
       }
+      function scopeLabel(input) {
+        return scopeText(input) || norm(input.placeholder);
+      }
+      function validFilter(value) {
+        return ["string", "number"].includes(typeof value);
+      }
+      function scopeMenuItems() {
+        return [...document.querySelectorAll('button,[role="option"],[role="menuitem"],li,span,div')].filter((e) => visible(e) && !e.closest(PANELS) && SCOPE_MENU_LABELS.includes(norm(e.textContent))).map(clickOwner).filter((e, i, a) => e && a.indexOf(e) === i && inScopeMenu(e));
+      }
       async function ensureScope(mode, stop) {
         const input = inputElement(), labels = SCOPE_LABELS[mode], store = findStore(input), filter = store?.getState()?.searchReducer?.searchFilter;
-        if (!store || !["string", "number"].includes(typeof filter)) throw problem("SCOPE", "無法核對搜尋範圍資料，已停止。");
-        const bindings = scopeBindings.get(store) || {};
-        if (bindings[mode] === filter || labels.includes(scopeText(input))) {
+        if (!store || !validFilter(filter)) throw problem("SCOPE", "無法核對搜尋範圍資料，已停止。");
+        const bindings = scopeBindings.get(store) || {}, boundElsewhere = (value) => Object.entries(bindings).some(([key, v]) => key !== mode && v === value);
+        if (bindings[mode] === filter || labels.includes(scopeText(input)) && !boundElsewhere(filter)) {
           bindings[mode] = filter;
           scopeBindings.set(store, bindings);
           return input;
         }
+        const expectChange = !labels.includes(scopeLabel(input)) || boundElsewhere(filter) || bindings[mode] !== void 0 && bindings[mode] !== filter;
         const findOption = () => {
           const matches = [...document.querySelectorAll('button,[role="option"],[role="menuitem"],li,span,div')].filter((e) => visible(e) && !e.closest(PANELS) && nearSearch(e, input) && labels.includes(norm(e.textContent))).map(clickOwner).filter((e, i, a) => e && a.indexOf(e) === i && inScopeMenu(e));
           return matches.length === 1 ? matches[0] : null;
@@ -581,9 +591,26 @@
         }
         safe(stop);
         activate(option);
-        await wait(() => labels.includes(scopeText(inputElement())) || !document.contains(option) || !visible(option), LIMITS.scope, stop, "SCOPE", "搜尋範圍切換未確認，已停止。");
-        const after = store.getState()?.searchReducer?.searchFilter;
-        if (!["string", "number"].includes(typeof after) || Object.entries(bindings).some(([key, value]) => key !== mode && value === after)) throw problem("SCOPE", "搜尋範圍資料無法區分，已停止。");
+        const settled = () => {
+          if (scopeMenuItems().length) return null;
+          const now = store.getState()?.searchReducer?.searchFilter;
+          if (!validFilter(now)) throw problem("SCOPE", "無法核對搜尋範圍資料，已停止。");
+          if (boundElsewhere(now) || bindings[mode] !== void 0 && bindings[mode] !== now) return null;
+          if (expectChange) {
+            if (now === filter) return null;
+          } else {
+            let current;
+            try {
+              current = inputElement();
+            } catch (error) {
+              if (error.code === "SEARCH_INPUT") return null;
+              throw error;
+            }
+            if (!labels.includes(scopeLabel(current))) return null;
+          }
+          return { value: now };
+        };
+        const after = (await wait(settled, LIMITS.scope, stop, "SCOPE", "搜尋範圍切換未確認（選單沒收起，或頁面的範圍一直沒換過去），已停止。")).value;
         bindings[mode] = after;
         scopeBindings.set(store, bindings);
         return inputElement();
@@ -1031,7 +1058,7 @@
       var blockCheck = require_precheck_block_check();
       var { problem, safeMessage } = require_util();
       var { mountPanel, gmAdapter } = require_panel();
-      var VERSION = "0.3.3";
+      var VERSION = "0.3.4";
       async function initPrecheck() {
         const gm = gmAdapter(), ui2 = mountPanel({ attribute: "data-account-precheck", title: `帳號預檢 v${VERSION}（只查、不發）`, position: { left: Math.min(Math.round(innerWidth * 0.28), Math.max(18, innerWidth - 380)), top: 80 }, gm, positionKey: storage2.STORE.panelPosition, html: `
     <label>直播原始 CSV（一份）<input data-files type="file" accept=".csv"></label><p data-file-list class="mini">請選原始檔，不要選篩選後的檔。</p><p data-resume class="mini"></p>
