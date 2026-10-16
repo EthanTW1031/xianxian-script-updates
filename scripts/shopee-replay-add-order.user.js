@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee 回放加單
 // @namespace    local.shopee.replay-add-order
-// @version      0.1.3
+// @version      0.1.4
 // @description  只讀聊聊回放加單，使用直播解析器，選 JAMBO 匯出檔讀商品清單，輸出獨立回放 CSV 與核對清單
 // @match        https://seller.shopee.tw/new-webchat/conversations*
 // @grant        GM_getValue
@@ -13,6 +13,7 @@
 // Candidate 0.1.2: product list is read from the JAMBO export (.xlsx); Ethan asked Claude to implement on 2026-10-15.
 // Requirements: 回放加單選JAMBO檔與庫存腳本認XX v0.1 (+ GPT reply v0.1).
 // 0.1.3 (2026-10-16): search-scope menu options on the real chat page are div elements; Ethan asked Claude to fix directly.
+// 0.1.4 (2026-10-16): only accept the scope search box (a product search box briefly appears when a chat opens).
 /* ===== BEGIN ExcelJS 4.4.0 (MIT License, https://github.com/exceljs/exceljs) — verbatim dist/exceljs.min.js, sha256 7e49da68588e250dbb8bba190d2caa8ab3787cc0284bda1d8b2f805c4df742c9 ===== */
 const __REPLAY_EXCELJS__=(function(){var module={exports:{}},exports=module.exports,define;
 /*! ExcelJS 19-10-2023 */
@@ -419,7 +420,7 @@ return module.exports;}).call(globalThis);
         throw problem(code, message);
       }
       function inputElement() {
-        const entries = [...document.querySelectorAll('input[placeholder*="搜尋"]')].filter((e) => visible(e) && !e.closest(PANELS));
+        const entries = [...document.querySelectorAll('input[placeholder*="搜尋"]')].filter((e) => SCOPE_MENU_LABELS.includes(e.placeholder) && visible(e) && !e.closest(PANELS));
         if (entries.length !== 1) throw problem("SEARCH_INPUT", "找不到唯一的聊聊搜尋框，已停止；請確認頁面正常。");
         return entries[0];
       }
@@ -1047,7 +1048,7 @@ ${lines.join("\n")}`;
       var chat2 = require_chat_runtime();
       var { problem, safeMessage } = require_util();
       var { mountPanel, gmAdapter } = require_panel();
-      var VERSION = "0.1.3";
+      var VERSION = "0.1.4";
       var STORE = Object.freeze({ config: "replay:config:v1", panelPosition: "replay:panel-position:v1" });
       async function initReplay(core2, jambo2) {
         const gm = gmAdapter(), ui2 = mountPanel({ attribute: "data-replay-add-order", title: `回放加單 v${VERSION}（只讀）`, colour: "#86501a", position: { left: Math.min(Math.round(innerWidth * 0.55), Math.max(18, innerWidth - 380)), top: 80 }, gm, positionKey: STORE.panelPosition, html: `

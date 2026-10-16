@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Shopee 帳號預檢
 // @namespace    local.shopee.account-precheck
-// @version      0.3.2
-// @description  只搜尋帳號與封鎖旗標，不發訊息；無損分開匯出預檢通過與待處理 CSV
+// @version      0.3.3
+// @description  搜尋帳號與封鎖旗標，不發訊息；搜尋結果沒有封鎖欄位時才點進對話看封鎖；無損分開匯出預檢通過與待處理 CSV
 // @match        https://seller.shopee.tw/new-webchat/conversations*
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -13,6 +13,7 @@
 // Isolated candidate; Ethan authorized implementation on 2026-10-14.
 // Requirements v0.7.
 // 0.3.2 (2026-10-16): search-scope menu options on the real chat page are div elements; Ethan asked Claude to fix directly.
+// 0.3.3 (2026-10-16): when the buyer search result has no blocked flag, open that chat to read it (Ethan chose 甲); only accept the scope search box.
 
 (() => {
   var __create = Object.create;
@@ -443,7 +444,7 @@
         throw problem(code, message);
       }
       function inputElement() {
-        const entries = [...document.querySelectorAll('input[placeholder*="搜尋"]')].filter((e) => visible(e) && !e.closest(PANELS));
+        const entries = [...document.querySelectorAll('input[placeholder*="搜尋"]')].filter((e) => SCOPE_MENU_LABELS.includes(e.placeholder) && visible(e) && !e.closest(PANELS));
         if (entries.length !== 1) throw problem("SEARCH_INPUT", "找不到唯一的聊聊搜尋框，已停止；請確認頁面正常。");
         return entries[0];
       }
@@ -847,6 +848,78 @@
     }
   });
 
+  // src/precheck-block-check.cjs
+  var require_precheck_block_check = __commonJS({
+    "src/precheck-block-check.cjs"(exports, module) {
+      "use strict";
+      var chat2 = require_chat_runtime();
+      var { problem, norm, decimal, safeUid } = require_util();
+      var object = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+      function fiberOf(node) {
+        const key = Object.keys(node || {}).find((k) => k.startsWith("__reactFiber$"));
+        return key ? node[key] : null;
+      }
+      function ownEntityInProps(node, predicate) {
+        let f = fiberOf(node);
+        for (let depth = 0; f && depth < 12; depth++, f = f.return) {
+          const props = f.memoizedProps;
+          const scan = (v, n) => {
+            if (!object(v) || n > 2 || typeof v.getState === "function") return false;
+            if (predicate(v)) return true;
+            return Object.keys(v).filter((k) => !["store", "children", "ref"].includes(k)).some((k) => {
+              const child = v[k];
+              return object(child) && scan(child, n + 1);
+            });
+          };
+          if (scan(props, 0)) return true;
+        }
+        return false;
+      }
+      function columnRoot(input) {
+        const ir = input.getBoundingClientRect();
+        let n = input.parentElement;
+        for (let d = 0; n && d < 10; d++, n = n.parentElement) {
+          const r = n.getBoundingClientRect();
+          if (r.width >= ir.width && r.width <= 700 && r.height >= 180) return n;
+        }
+        throw problem("BLOCK_CHECK_FAILED", "找不到左側搜尋清單。");
+      }
+      function classifyForPrecheck(results, account) {
+        const base = chat2.classifyUser(results, account);
+        if (base.code !== "IDENTITY_INVALID") return base;
+        const exact = results.filter((r2) => r2.to_name === account);
+        const r = exact[0];
+        if (exact.length !== 1 || !safeUid(r.to_id) || typeof r.id !== "string" || !r.id) return base;
+        if (decimal(r.id) && typeof r.is_blocked === "boolean") return base;
+        return { status: "needsBlockCheck", code: "BLOCK_FLAG_MISSING", detail: "搜尋結果沒有封鎖欄位，要點進對話確認。", match: { id: r.id, to_name: r.to_name, to_id: r.to_id } };
+      }
+      function createBlockChecker({ stop = () => false, timeout = chat2.LIMITS.conversation } = {}) {
+        return async function checkBlocked(match) {
+          if (!object(match) || typeof match.to_name !== "string" || !match.to_name || !safeUid(match.to_id) || typeof match.id !== "string" || !match.id) throw problem("BLOCK_CHECK_FAILED", "搜尋結果的帳號或 UID 不完整。");
+          const input = chat2.inputElement(), store = chat2.findStore(input);
+          if (!store) throw problem("STORE", "找不到聊聊資料，已停止。");
+          const nodes = [...columnRoot(input).querySelectorAll("div,li,span,p")].filter((e) => chat2.visible(e) && !e.closest(chat2.PANELS) && norm(e.textContent) === match.to_name && ownEntityInProps(e, (v) => v.id === match.id && v.to_name === match.to_name && v.to_id === match.to_id));
+          nodes.sort((a, b) => {
+            const x = a.getBoundingClientRect(), y = b.getBoundingClientRect();
+            return x.width * x.height - y.width * y.height;
+          });
+          if (!nodes.length) throw problem("BLOCK_CHECK_FAILED", "搜尋結果的畫面對不上這位買家。");
+          chat2.safe(stop);
+          chat2.activate(nodes[0]);
+          return chat2.wait(() => {
+            const state = store.getState(), id = state.conversationReducer?.currentConversationId;
+            if (!decimal(id)) return null;
+            const c = state.entityReducer?.conversations?.[id];
+            if (!object(c) || c.to_id !== match.to_id) return null;
+            if (c.to_name !== match.to_name || c.id !== void 0 && c.id !== id) throw problem("BLOCK_CHECK_FAILED", "打開的對話和搜尋的帳號對不上。");
+            return typeof c.is_blocked === "boolean" ? { conversationId: id, is_blocked: c.is_blocked } : null;
+          }, timeout, stop, "BLOCK_CHECK_FAILED", "點進對話後讀不到封鎖狀態。");
+        };
+      }
+      module.exports = { classifyForPrecheck, createBlockChecker };
+    }
+  });
+
   // src/panel.cjs
   var require_panel = __commonJS({
     "src/panel.cjs"(exports, module) {
@@ -955,9 +1028,10 @@
       var core2 = require_precheck_core();
       var storage2 = require_precheck_storage();
       var chat2 = require_chat_runtime();
+      var blockCheck = require_precheck_block_check();
       var { problem, safeMessage } = require_util();
       var { mountPanel, gmAdapter } = require_panel();
-      var VERSION = "0.3.2";
+      var VERSION = "0.3.3";
       async function initPrecheck() {
         const gm = gmAdapter(), ui2 = mountPanel({ attribute: "data-account-precheck", title: `帳號預檢 v${VERSION}（只查、不發）`, position: { left: Math.min(Math.round(innerWidth * 0.28), Math.max(18, innerWidth - 380)), top: 80 }, gm, positionKey: storage2.STORE.panelPosition, html: `
     <label>直播原始 CSV（一份）<input data-files type="file" accept=".csv"></label><p data-file-list class="mini">請選原始檔，不要選篩選後的檔。</p><p data-resume class="mini"></p>
@@ -965,7 +1039,7 @@
     <label>買家與狀態<select data-preview-select></select></label><p data-source class="mini"></p><div class="actions"><button data-mark-manual>這位人工確認找得到（留）</button><button data-mark-blocked>這位列入黑名單</button></div>
     <label class="check"><input data-dry type="checkbox" checked><span>演練：前 3 位待查者，只顯示判斷、不寫結果。</span></label><button data-start class="primary">開始演練</button><button data-stop class="danger stop hidden">緊急停止</button>
     <p data-status class="status">正在準備紀錄…</p><p data-summary class="mini"></p><div class="actions"><button data-export-filtered>匯出預檢通過的直播檔</button><button data-export-pending>匯出待處理直播檔</button><button data-export-list>匯出名單與結果</button></div>
-    <button data-recheck>搜尋未確認的重新查一次</button><details><summary>整份重新查</summary><button data-new-round>這份檔重新全部查一次</button></details><p class="mini">完全不發訊息、不開對話。預檢時不要發明細。待處理檔不能拿來叫貨；後續更新須重新匯出、另建場次。</p><pre data-log></pre>` });
+    <button data-recheck>搜尋未確認的重新查一次</button><details><summary>整份重新查</summary><button data-new-round>這份檔重新全部查一次</button></details><p class="mini">完全不發訊息；只有搜尋結果沒有封鎖欄位的客人，才點進對話看封鎖（對話會變已讀）。預檢時不要發明細。待處理檔不能拿來叫貨；後續更新須重新匯出、另建場次。</p><pre data-log></pre>` });
         if (!ui2) return;
         const $ = ui2.$, repo = storage2.createRepository(gm);
         const state = { entry: null, queue: null, round: 0, records: {}, blacklist: [], busy: true, running: false, stop: false, booted: false };
@@ -1123,7 +1197,7 @@
                 ui2.show("沒有待查者；搜尋未確認需手動重查。");
                 return;
               }
-              const runtime = chat2.createChatRuntime({ stop: () => state.stop, onStatus: ui2.show, allowConversation: false });
+              const runtime = chat2.createChatRuntime({ stop: () => state.stop, onStatus: ui2.show, allowConversation: false }), checkBlocked = blockCheck.createBlockChecker({ stop: () => state.stop });
               await runtime.ready(false);
               for (let index = 0; index < items.length; index++) {
                 runtime.safe();
@@ -1133,13 +1207,23 @@
                 let result;
                 try {
                   const q = await runtime.query(item.account, "user", "all");
-                  result = chat2.classifyUser(q.results, item.account);
+                  result = blockCheck.classifyForPrecheck(q.results, item.account);
                 } catch (error) {
                   if (error.code !== "SEARCH_UNFINISHED") throw error;
                   result = { status: "searchUnconfirmed", code: error.code, detail: "未完成搜尋：沒有看到本次重設與完成，請人工核對後手動重查。" };
                 }
+                if (result.status === "needsBlockCheck") {
+                  ui2.show(`${dry ? "演練" : "檢查"} ${index + 1}／${items.length}：${item.account}（點進對話看封鎖）`);
+                  try {
+                    const b = await checkBlocked(result.match);
+                    result = b.is_blocked ? { status: "chatBlocked", code: "CHAT_BLOCKED_AFTER_OPEN", detail: "搜尋結果沒有封鎖欄位；點進對話確認：聊聊已封鎖，整位排除。" } : { status: "found", code: "FOUND_AFTER_OPEN", detail: "搜尋結果沒有封鎖欄位；點進對話確認沒封鎖（對話會變已讀），沒有發送訊息。" };
+                  } catch (error) {
+                    if (error.code !== "BLOCK_CHECK_FAILED") throw error;
+                    result = { status: "searchUnconfirmed", code: "BLOCK_CHECK_FAILED", detail: `找得到帳號，但點進對話確認封鎖沒有成功（${error.message}），請人工核對。` };
+                  }
+                }
                 if (!dry) await repo.write(state.queue, state.entry, item, result.status, result.code, result.detail);
-                ui2.log(`${item.account}：${result.status === "found" ? "找得到，留" : result.status === "chatBlocked" ? "聊聊已封鎖，排除" : "搜尋未確認"}${dry ? "（演練，不寫結果）" : ""}`);
+                ui2.log(`${item.account}：${result.status === "found" ? "找得到，留" : result.status === "chatBlocked" ? "聊聊已封鎖，排除" : "搜尋未確認"}${/_AFTER_OPEN$/u.test(result.code) ? "（點進對話確認）" : ""}${dry ? "（演練，不寫結果）" : ""}`);
                 await render();
                 if (index < items.length - 1) await runtime.delay(dry ? 500 : 2e3 + Math.floor(Math.random() * 2001));
               }
