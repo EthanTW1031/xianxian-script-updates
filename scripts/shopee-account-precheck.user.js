@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee 帳號預檢
 // @namespace    local.shopee.account-precheck
-// @version      0.3.5
+// @version      0.3.6
 // @description  搜尋帳號與封鎖旗標，不發訊息；搜尋結果沒有封鎖欄位時才點進對話看封鎖；無損分開匯出預檢通過與待處理 CSV
 // @match        https://seller.shopee.tw/new-webchat/conversations*
 // @grant        GM_getValue
@@ -15,6 +15,7 @@
 // 0.3.2 (2026-10-16): search-scope menu options on the real chat page are div elements; Ethan asked Claude to fix directly.
 // 0.3.3 (2026-10-16): when the buyer search result has no blocked flag, open that chat to read it (Ethan chose 甲); only accept the scope search box.
 // 0.3.5 (2026-10-17): when the chat page never loads its search data, tell staff to reload the page (F5) instead of waiting; Ethan asked Claude to change it directly.
+// 0.3.6 (2026-10-17): rebuilt with the shared chat code from replay 0.1.7; precheck behaviour is the same as 0.3.5.
 
 (() => {
   var __create = Object.create;
@@ -666,7 +667,7 @@
         if (!object(c) || !object(rel)) return null;
         if (c.id !== void 0 && c.id !== id) throw problem("DATA", "對話編號資料矛盾，已停止。");
         if (!safeUid(c.to_id) || typeof c.to_name !== "string" || typeof c.is_blocked !== "boolean" || !Array.isArray(rel.all) || typeof rel.hasMoreOlderMessage !== "boolean" || typeof rel.hasMoreLatestMessage !== "boolean") throw problem("DATA", "對話或訊息清單格式異常，已停止。");
-        if (rel.hasMoreLatestMessage) throw problem("LATEST_NOT_LOADED", "這個對話尚未讀到最新一端，已停止；請人工確認後重跑。");
+        if (rel.hasMoreLatestMessage && !(decimal(c.latest_message_id) && rel.all[0] === c.latest_message_id)) throw problem("LATEST_NOT_LOADED", "這個對話尚未讀到最新一端，已停止；請人工確認後重跑。");
         const seen = /* @__PURE__ */ new Set(), precisions = /* @__PURE__ */ new Set(), messages = rel.all.map((mid) => {
           if (!decimal(mid) || seen.has(mid)) throw problem("DATA", "對話訊息編號重複或格式不正確，已停止。");
           seen.add(mid);
@@ -859,6 +860,11 @@
             }
             if (!document.contains(scroller)) throw problem("UI_BINDING", "訊息捲動區被替換，已停止。");
             const known = new Set(collected.keys());
+            if (scroller.scrollTop === 0 && scroller.scrollHeight > scroller.clientHeight) {
+              scroller.scrollTop = Math.min(200, scroller.scrollHeight - scroller.clientHeight);
+              scroller.dispatchEvent(new Event("scroll", { bubbles: true }));
+              await sleep(400, stop);
+            }
             scroller.scrollTop = 0;
             scroller.dispatchEvent(new Event("scroll", { bubbles: true }));
             frame = await wait(() => {
@@ -1068,7 +1074,7 @@
       var blockCheck = require_precheck_block_check();
       var { problem, safeMessage } = require_util();
       var { mountPanel, gmAdapter } = require_panel();
-      var VERSION = "0.3.5";
+      var VERSION = "0.3.6";
       async function initPrecheck() {
         const gm = gmAdapter(), ui2 = mountPanel({ attribute: "data-account-precheck", title: `帳號預檢 v${VERSION}（只查、不發）`, position: { left: Math.min(Math.round(innerWidth * 0.28), Math.max(18, innerWidth - 380)), top: 80 }, gm, positionKey: storage2.STORE.panelPosition, html: `
     <label>直播原始 CSV（一份）<input data-files type="file" accept=".csv"></label><p data-file-list class="mini">請選原始檔，不要選篩選後的檔。</p><p data-resume class="mini"></p>

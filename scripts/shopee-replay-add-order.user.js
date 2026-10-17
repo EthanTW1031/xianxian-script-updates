@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee 回放加單
 // @namespace    local.shopee.replay-add-order
-// @version      0.1.6
+// @version      0.1.7
 // @description  只讀聊聊回放加單，使用直播解析器，選 JAMBO 匯出檔讀商品清單，輸出獨立回放 CSV 與核對清單
 // @match        https://seller.shopee.tw/new-webchat/conversations*
 // @grant        GM_getValue
@@ -15,6 +15,7 @@
 // 0.1.3 (2026-10-16): search-scope menu options on the real chat page are div elements; Ethan asked Claude to fix directly.
 // 0.1.4 (2026-10-16): only accept the scope search box (a product search box briefly appears when a chat opens).
 // 0.1.6 (2026-10-17): chat messages no longer carry created_timestamp_nano; use seconds plus message id. Reload hint when the page never becomes ready. Ethan asked Claude to change it directly.
+// 0.1.7 (2026-10-17): chats opened at the first unread message: accept the latest message as loaded when it equals latest_message_id of the chat, and scroll down a little before scrolling back to the top to load older messages.
 /* ===== BEGIN ExcelJS 4.4.0 (MIT License, https://github.com/exceljs/exceljs) — verbatim dist/exceljs.min.js, sha256 7e49da68588e250dbb8bba190d2caa8ab3787cc0284bda1d8b2f805c4df742c9 ===== */
 const __REPLAY_EXCELJS__=(function(){var module={exports:{}},exports=module.exports,define;
 /*! ExcelJS 19-10-2023 */
@@ -642,7 +643,7 @@ return module.exports;}).call(globalThis);
         if (!object(c) || !object(rel)) return null;
         if (c.id !== void 0 && c.id !== id) throw problem("DATA", "對話編號資料矛盾，已停止。");
         if (!safeUid(c.to_id) || typeof c.to_name !== "string" || typeof c.is_blocked !== "boolean" || !Array.isArray(rel.all) || typeof rel.hasMoreOlderMessage !== "boolean" || typeof rel.hasMoreLatestMessage !== "boolean") throw problem("DATA", "對話或訊息清單格式異常，已停止。");
-        if (rel.hasMoreLatestMessage) throw problem("LATEST_NOT_LOADED", "這個對話尚未讀到最新一端，已停止；請人工確認後重跑。");
+        if (rel.hasMoreLatestMessage && !(decimal(c.latest_message_id) && rel.all[0] === c.latest_message_id)) throw problem("LATEST_NOT_LOADED", "這個對話尚未讀到最新一端，已停止；請人工確認後重跑。");
         const seen = /* @__PURE__ */ new Set(), precisions = /* @__PURE__ */ new Set(), messages = rel.all.map((mid) => {
           if (!decimal(mid) || seen.has(mid)) throw problem("DATA", "對話訊息編號重複或格式不正確，已停止。");
           seen.add(mid);
@@ -835,6 +836,11 @@ return module.exports;}).call(globalThis);
             }
             if (!document.contains(scroller)) throw problem("UI_BINDING", "訊息捲動區被替換，已停止。");
             const known = new Set(collected.keys());
+            if (scroller.scrollTop === 0 && scroller.scrollHeight > scroller.clientHeight) {
+              scroller.scrollTop = Math.min(200, scroller.scrollHeight - scroller.clientHeight);
+              scroller.dispatchEvent(new Event("scroll", { bubbles: true }));
+              await sleep(400, stop);
+            }
             scroller.scrollTop = 0;
             scroller.dispatchEvent(new Event("scroll", { bubbles: true }));
             frame = await wait(() => {
@@ -1085,7 +1091,7 @@ ${lines.join("\n")}`;
       var chat2 = require_chat_runtime();
       var { problem, safeMessage } = require_util();
       var { mountPanel, gmAdapter } = require_panel();
-      var VERSION = "0.1.6";
+      var VERSION = "0.1.7";
       var STORE = Object.freeze({ config: "replay:config:v1", panelPosition: "replay:panel-position:v1" });
       async function initReplay(core2, jambo2) {
         const gm = gmAdapter(), ui2 = mountPanel({ attribute: "data-replay-add-order", title: `回放加單 v${VERSION}（只讀）`, colour: "#86501a", position: { left: Math.min(Math.round(innerWidth * 0.55), Math.max(18, innerWidth - 380)), top: 80 }, gm, positionKey: STORE.panelPosition, html: `
