@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee 帳號預檢
 // @namespace    local.shopee.account-precheck
-// @version      0.3.4
+// @version      0.3.5
 // @description  搜尋帳號與封鎖旗標，不發訊息；搜尋結果沒有封鎖欄位時才點進對話看封鎖；無損分開匯出預檢通過與待處理 CSV
 // @match        https://seller.shopee.tw/new-webchat/conversations*
 // @grant        GM_getValue
@@ -14,6 +14,7 @@
 // Requirements v0.7.
 // 0.3.2 (2026-10-16): search-scope menu options on the real chat page are div elements; Ethan asked Claude to fix directly.
 // 0.3.3 (2026-10-16): when the buyer search result has no blocked flag, open that chat to read it (Ethan chose 甲); only accept the scope search box.
+// 0.3.5 (2026-10-17): when the chat page never loads its search data, tell staff to reload the page (F5) instead of waiting; Ethan asked Claude to change it directly.
 
 (() => {
   var __create = Object.create;
@@ -666,25 +667,30 @@
         if (c.id !== void 0 && c.id !== id) throw problem("DATA", "對話編號資料矛盾，已停止。");
         if (!safeUid(c.to_id) || typeof c.to_name !== "string" || typeof c.is_blocked !== "boolean" || !Array.isArray(rel.all) || typeof rel.hasMoreOlderMessage !== "boolean" || typeof rel.hasMoreLatestMessage !== "boolean") throw problem("DATA", "對話或訊息清單格式異常，已停止。");
         if (rel.hasMoreLatestMessage) throw problem("LATEST_NOT_LOADED", "這個對話尚未讀到最新一端，已停止；請人工確認後重跑。");
-        const seen = /* @__PURE__ */ new Set(), messages = rel.all.map((mid) => {
+        const seen = /* @__PURE__ */ new Set(), precisions = /* @__PURE__ */ new Set(), messages = rel.all.map((mid) => {
           if (!decimal(mid) || seen.has(mid)) throw problem("DATA", "對話訊息編號重複或格式不正確，已停止。");
           seen.add(mid);
           const m = s.entityReducer.messages?.[mid];
-          if (!object(m) || m.id !== mid || m.conversation_id !== id || !decimal(m.created_timestamp_nano) || !Number.isSafeInteger(m.created_timestamp) || BigInt(m.created_timestamp_nano) / 1000000000n !== BigInt(m.created_timestamp) || typeof m.type !== "string") throw problem("DATA", "訊息實體、時間或對話歸屬無法確認，已停止。");
+          if (!object(m) || m.id !== mid || m.conversation_id !== id || !Number.isSafeInteger(m.created_timestamp) || m.created_timestamp <= 0 || typeof m.type !== "string") throw problem("DATA", "訊息實體、時間或對話歸屬無法確認，已停止。");
+          const hasNano = m.created_timestamp_nano !== void 0;
+          if (hasNano && (!decimal(m.created_timestamp_nano) || BigInt(m.created_timestamp_nano) / 1000000000n !== BigInt(m.created_timestamp))) throw problem("DATA", "訊息的奈秒時間和秒數對不上，已停止。");
+          precisions.add(hasNano ? "nano" : "seconds");
           if (m.type === "text" && (!safeUid(m.from_id) || typeof m.content?.text !== "string")) throw problem("DATA", "文字訊息的傳送者或內容格式無法確認，已停止。");
-          return { id: m.id, conversation_id: id, nano: m.created_timestamp_nano, seconds: m.created_timestamp, from_id: m.from_id, type: m.type, text: m.type === "text" ? m.content.text : "" };
+          return { id: m.id, conversation_id: id, nano: hasNano ? m.created_timestamp_nano : String(BigInt(m.created_timestamp) * 1000000000n), seconds: m.created_timestamp, from_id: m.from_id, type: m.type, text: m.type === "text" ? m.content.text : "" };
         });
+        if (precisions.size > 1) throw problem("DATA", "同一個對話的訊息時間格式不一致（有的有奈秒、有的沒有），已停止。");
         for (let i = 1; i < messages.length; i++) if (BigInt(messages[i].nano) > BigInt(messages[i - 1].nano) || messages[i].nano === messages[i - 1].nano && compareIds(messages[i].id, messages[i - 1].id) > 0) throw problem("DATA", "對話訊息排序與預期不同，已停止。");
-        return { conversation: { id, to_name: c.to_name, to_id: c.to_id, is_blocked: c.is_blocked }, messages, hasMoreOlder: rel.hasMoreOlderMessage };
+        return { conversation: { id, to_name: c.to_name, to_id: c.to_id, is_blocked: c.is_blocked }, messages, hasMoreOlder: rel.hasMoreOlderMessage, precision: [...precisions][0] ?? null };
       }
       function assertCandidateTitlesRead(value, candidate) {
         if (value.conversation.is_blocked) return;
         const expected = candidate.titleMessages ?? [{ id: candidate.titleMessageId, nano: candidate.titleNano }];
         const found = new Map(value.messages.map((message) => [message.id, message]));
+        const sameTime = (message, title) => value.precision === "seconds" ? BigInt(message.nano) / 1000000000n === BigInt(title.nano) / 1000000000n : message.nano === title.nano;
         if (!Array.isArray(expected) || !expected.length || value.conversation.id !== candidate.conversation_id || expected.some((title) => {
           const message = found.get(title?.id);
-          return !decimal(title?.id) || !decimal(title?.nano) || !message || message.conversation_id !== candidate.conversation_id || message.nano !== title.nano;
-        })) throw problem("TITLE_NOT_READ", "對話沒有讀到與搜尋結果相符的標題訊息（訊息缺少或奈秒時間不同），讀取不完整，已停止。");
+          return !decimal(title?.id) || !decimal(title?.nano) || !message || message.conversation_id !== candidate.conversation_id || !sameTime(message, title);
+        })) throw problem("TITLE_NOT_READ", "對話沒有讀到與搜尋結果相符的標題訊息（訊息缺少或時間不同），讀取不完整，已停止。");
       }
       function createChatRuntime({ stop = () => false, onStatus = () => {
       }, limits = {}, allowConversation = false } = {}) {
@@ -713,7 +719,7 @@
             if (status !== "ready") return null;
             store = found;
             return store;
-          }, timing.root, stop, "NOT_READY", "聊聊資料還沒準備好／讀不到資料，請等頁面載完再試。");
+          }, timing.root, stop, "NOT_READY", `聊聊頁面等了 ${Math.round(timing.root / 1e3)} 秒還沒準備好（搜尋或訊息功能沒有載入），再等也不會好；請按 F5 重新整理聊聊頁面，等約 20 秒後再重新開始。`);
         }
         async function query(target, branch = "user", mode = "all") {
           if (typeof target !== "string" || !target.trim()) throw problem("SEARCH_INPUT", "搜尋關鍵字不能空白。");
@@ -831,9 +837,13 @@
           let frame = await openConversation(candidate);
           if (frame.conversation.is_blocked) return frame;
           const collected = /* @__PURE__ */ new Map();
-          let scroller = null;
+          let scroller = null, precision = null;
           while (true) {
             safe(stop);
+            if (frame.precision) {
+              if (precision && precision !== frame.precision) throw problem("DATA", "同一個對話往上讀時，訊息時間格式變了（有的有奈秒、有的沒有），已停止。");
+              precision = frame.precision;
+            }
             for (const m of frame.messages) {
               const old = collected.get(m.id);
               if (old && canonical(old) !== canonical(m)) throw problem("DATA", "已讀的訊息內容或時間被改掉，已停止。");
@@ -859,7 +869,7 @@
             }, timing.page, stop);
             onStatus(`已讀此對話 ${collected.size} 則訊息`);
           }
-          const value = { conversation: frame.conversation, messages: [...collected.values()], hasMoreOlder: frame.hasMoreOlder };
+          const value = { conversation: frame.conversation, messages: [...collected.values()], hasMoreOlder: frame.hasMoreOlder, precision };
           assertCandidateTitlesRead(value, candidate);
           return value;
         }
@@ -1058,7 +1068,7 @@
       var blockCheck = require_precheck_block_check();
       var { problem, safeMessage } = require_util();
       var { mountPanel, gmAdapter } = require_panel();
-      var VERSION = "0.3.4";
+      var VERSION = "0.3.5";
       async function initPrecheck() {
         const gm = gmAdapter(), ui2 = mountPanel({ attribute: "data-account-precheck", title: `帳號預檢 v${VERSION}（只查、不發）`, position: { left: Math.min(Math.round(innerWidth * 0.28), Math.max(18, innerWidth - 380)), top: 80 }, gm, positionKey: storage2.STORE.panelPosition, html: `
     <label>直播原始 CSV（一份）<input data-files type="file" accept=".csv"></label><p data-file-list class="mini">請選原始檔，不要選篩選後的檔。</p><p data-resume class="mini"></p>
