@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "publishedAt": "2026-10-17T05:56:44.443Z",
+  "publishedAt": "2026-10-18T04:28:09.517Z",
   "scripts": [
     {
       "id": "fb-inbox-finder",
@@ -16,11 +16,11 @@
       "id": "jambo-new-buyer",
       "name": "Jambo 新買家檢查",
       "namespace": "https://jambolive.tv/",
-      "version": "4.0.3",
+      "version": "4.0.4",
       "file": "scripts/jambo-new-buyer.user.js",
-      "sha256": "35fbf01066af4645a13f9712540636cc40e4190efc826c81b59ee807b81ffb30",
-      "bytes": 35015,
-      "updatedAt": "2026-09-25T06:48:20.407Z"
+      "sha256": "c7ab31432ff2d458a03888b7eea6086d9dc6f10995e06241b8961a2669933dad",
+      "bytes": 36931,
+      "updatedAt": "2026-10-18T04:28:09.517Z"
     },
     {
       "id": "jambo-product-image-batch-upload",

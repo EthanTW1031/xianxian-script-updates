@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jambo 新買家檢查
 // @namespace    https://jambolive.tv/
-// @version      4.0.3
+// @version      4.0.4
 // @description  訂單頁掃描 NEW 新買家並匯出含嵌入頭像的 Excel 核對名單
 // @match        https://jambolive.tv/console/order/*
 // @require      https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js
@@ -10,6 +10,7 @@
 // @connect      fbcdn.net
 // @connect      fbsbx.com
 // @connect      cdn.jambolive.tv
+// @connect      jambolive.tv
 // @noframes
 // @run-at       document-idle
 // ==/UserScript==
@@ -18,6 +19,7 @@
   'use strict';
   if (!window.location.pathname.startsWith('/console/order/')) return;
   const PANEL_ID = 'jambo-new-buyer-excel-panel';
+  const SCRIPT_VERSION = '4.0.4';
   if (document.getElementById(PANEL_ID)) return;
   // Support the current Jambo fan cell and both earlier name layouts.
   const NAME_SELECTOR = '.jb-fan-cell__name, .jb-name-line__name, .fans-info-name';
@@ -283,13 +285,24 @@
       ? '匯出部分名單（結果尚未完整）' : '匯出 Excel（含頭像）';
   }
 
+  function avatarRequestPolicy(url) {
+    let parsed;
+    try { parsed = new URL(url); }
+    catch { throw new Error('頭像網址無效'); }
+    const allowed = ['graph.facebook.com', 'fbcdn.net', 'fbsbx.com', 'cdn.jambolive.tv'];
+    const isJamboProxy = parsed.hostname === 'jambolive.tv' &&
+      /^\/api\/fb-avatar\/[A-Za-z0-9_:-]+\/?$/.test(parsed.pathname);
+    if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.port ||
+        (!isJamboProxy && !allowed.some(host => parsed.hostname === host || parsed.hostname.endsWith(`.${host}`)))) {
+      throw new Error('頭像來源不在允許清單');
+    }
+    // Only the first-party avatar endpoint may use the existing Jambo login.
+    return { url: parsed.href, isJamboProxy };
+  }
+
   function requestAvatar(url) {
     return new Promise((resolve, reject) => {
-      const allowed = ['graph.facebook.com', 'fbcdn.net', 'fbsbx.com', 'cdn.jambolive.tv'];
-      const parsed = new URL(url);
-      if (parsed.protocol !== 'https:' || !allowed.some(host => parsed.hostname === host || parsed.hostname.endsWith(`.${host}`))) {
-        reject(new Error('頭像來源不在允許清單')); return;
-      }
+      const policy = avatarRequestPolicy(url);
       let request, finished = false;
       const finish = (error, value) => {
         if (finished) return;
@@ -306,18 +319,40 @@
       activeRequests.add(cancel);
       try {
         request = GM_xmlhttpRequest({
-          method: 'GET', url, responseType: 'arraybuffer', anonymous: true, timeout: 15000,
+          method: 'GET', url: policy.url, responseType: 'arraybuffer',
+          anonymous: !policy.isJamboProxy, timeout: 15000,
           onload: response => {
-            if (response.status < 200 || response.status >= 300) { finish(new Error(`頭像 HTTP ${response.status}`)); return; }
-            const bytes = new Uint8Array(response.response || new ArrayBuffer(0));
-            if (!bytes.length || bytes.length > 5 * 1024 * 1024) { finish(new Error('頭像空白或超過 5 MB')); return; }
-            let mime = '';
-            if (bytes[0] === 0xff && bytes[1] === 0xd8) mime = 'image/jpeg';
-            else if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) mime = 'image/png';
-            else if (bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46) mime = 'image/gif';
-            else if (String.fromCharCode(...bytes.slice(0, 4)) === 'RIFF' && String.fromCharCode(...bytes.slice(8, 12)) === 'WEBP') mime = 'image/webp';
-            if (!mime) { finish(new Error('頭像回應不是可用圖片')); return; }
-            finish(null, new Blob([bytes], { type: mime }));
+            try {
+              if (policy.isJamboProxy && [401, 403].includes(response.status)) {
+                throw new Error(`JAMBO 頭像 HTTP ${response.status}，請確認登入狀態與存取權限`);
+              }
+              if (response.status === 429) throw new Error('頭像請求過於頻繁（HTTP 429），請稍後重新匯出');
+              if (!(response.status >= 200 && response.status < 300)) throw new Error(`頭像 HTTP ${response.status || 0}`);
+              if (response.finalUrl) {
+                const final = new URL(response.finalUrl);
+                if (policy.isJamboProxy && final.hostname === 'jambolive.tv' &&
+                    !/^\/api\/fb-avatar\/[A-Za-z0-9_:-]+\/?$/.test(final.pathname)) {
+                  throw new Error('JAMBO 頭像轉到其他頁面，請確認登入後重新匯出');
+                }
+                avatarRequestPolicy(response.finalUrl);
+              }
+              if (/^content-type\s*:\s*(?:text\/html|application\/xhtml\+xml)\b/im.test(response.responseHeaders || '')) {
+                throw new Error(policy.isJamboProxy
+                  ? 'JAMBO 頭像回應為網頁，請確認登入後重新匯出'
+                  : '頭像回應為網頁，無法當成圖片');
+              }
+              const bytes = new Uint8Array(response.response || new ArrayBuffer(0));
+              if (!bytes.length || bytes.length > 5 * 1024 * 1024) throw new Error('頭像空白或超過 5 MB');
+              let mime = '';
+              if (bytes[0] === 0xff && bytes[1] === 0xd8) mime = 'image/jpeg';
+              else if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) mime = 'image/png';
+              else if (bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46) mime = 'image/gif';
+              else if (String.fromCharCode(...bytes.slice(0, 4)) === 'RIFF' && String.fromCharCode(...bytes.slice(8, 12)) === 'WEBP') mime = 'image/webp';
+              if (!mime) throw new Error(policy.isJamboProxy
+                ? 'JAMBO 頭像回應不是可用圖片，請確認登入狀態或稍後重試'
+                : '頭像回應不是可用圖片');
+              finish(null, new Blob([bytes], { type: mime }));
+            } catch (error) { finish(error); }
           },
           onerror: () => finish(new Error('頭像下載失敗')),
           ontimeout: () => finish(new Error('頭像下載逾時')),
@@ -559,7 +594,7 @@
     panel.id = PANEL_ID;
     panel.setAttribute('aria-label', 'Jambo 新買家 Excel');
     panel.innerHTML = `
-      <div class="jna-header"><strong>新買家 Excel</strong><button type="button" class="jna-toggle" aria-label="展開新買家 Excel" aria-expanded="false">+</button></div>
+      <div class="jna-header"><strong>新買家 Excel v${SCRIPT_VERSION}</strong><button type="button" class="jna-toggle" aria-label="展開新買家 Excel" aria-expanded="false">+</button></div>
       <div class="jna-body">
         <div class="jna-actions"><button type="button" class="jna-scan" data-role="scan">載入全部訂單並掃描</button><button type="button" class="jna-stop" data-role="stop" disabled>停止</button></div>
         <div class="jna-status" data-role="status" role="status" aria-live="polite">按下掃描，整理目前篩選範圍的新買家。</div>
