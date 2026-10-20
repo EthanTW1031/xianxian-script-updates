@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jambo 商品庫存
 // @namespace    https://jambolive.tv/
-// @version      2.1.1
+// @version      2.1.2
 // @description  獨立匯出含圖片、成本價與直購價的商品庫存及五欄商品清單 XLSX
 // @match        https://jambolive.tv/console/commodity/*
 // @require      https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js
@@ -226,7 +226,37 @@
     return Number.isSafeInteger(number) && number >= 0 ? number : null;
   }
 
+  function getModernProductRow(nameElement) {
+    const row = nameElement.closest('#commodity-table tbody > tr');
+    return row?.querySelector(':scope > [data-jb-cell="title"]') ? row : null;
+  }
+
+  function getModernTable() {
+    const table = document.getElementById('commodity-table');
+    return table?.querySelector('[data-jb-cell], [data-jb-col]') ? table : null;
+  }
+
+  function getProductNames() {
+    const table = getModernTable();
+    if (table) {
+      return Array.from(table.querySelectorAll('tbody > tr')).map((row) =>
+        row.querySelector('[data-jb-cell="title"] .jb-media-cell__body > .u-block')
+      ).filter(Boolean);
+    }
+    return Array.from(document.querySelectorAll('p.name'));
+  }
+
+  function getProductName(nameElement) {
+    if (!getModernProductRow(nameElement)) return cleanText(nameElement.textContent);
+    // 款式數量是名稱 span 的子元素，不屬於商品名稱。
+    return cleanText(Array.from(nameElement.childNodes)
+      .filter((node) => node.nodeType === 3)
+      .map((node) => node.textContent).join(''));
+  }
+
   function findProductInfoTable(nameElement) {
+    const modernRow = getModernProductRow(nameElement);
+    if (modernRow) return modernRow;
     const productContainer = nameElement.parentElement;
     if (!productContainer) return null;
 
@@ -243,6 +273,15 @@
 
   function readProductInfoValue(infoTable, label) {
     if (!infoTable) return '';
+
+    if (infoTable.matches('#commodity-table tbody > tr')) {
+      if (label === '銷售方式') {
+        return cleanText(infoTable.querySelector('[data-jb-cell="title"] .jb-badge')?.textContent);
+      }
+      const columns = { '關鍵字': 'keyword', '成本': 'cost', '直購價/起標價': 'price' };
+      const column = columns[label];
+      return column ? cleanText(infoTable.querySelector(`:scope > [data-jb-col="${column}"]`)?.textContent) : '';
+    }
 
     const cell = Array.from(infoTable.querySelectorAll('td')).find(
       (candidate) =>
@@ -356,7 +395,7 @@
   }
 
   function extractCatalogProduct(nameElement, styleValues) {
-    const rawProductName = cleanText(nameElement.textContent);
+    const rawProductName = getProductName(nameElement);
     const infoTable = findProductInfoTable(nameElement);
     const code = normalizeCatalogToken(
       readProductInfoValue(infoTable, '關鍵字')
@@ -428,7 +467,7 @@
     Array.from(row.children).filter((element) => element.tagName === tagName);
 
   function getProductProgress() {
-    const loaded = document.querySelectorAll('p.name').length;
+    const loaded = getProductNames().length;
     const progressElement = Array.from(
       document.querySelectorAll('div, span, p')
     ).find((element) =>
@@ -440,6 +479,7 @@
 
     return {
       loaded,
+      reportedLoaded: match ? Number(match[1]) : null,
       total: match ? Number(match[2]) : null,
     };
   }
@@ -455,6 +495,14 @@
   }
 
   function isAllProductsLoaded() {
+    const progress = getProductProgress();
+    if (progress.total !== null &&
+        (progress.loaded !== progress.total || progress.reportedLoaded !== progress.total)) return false;
+    if (getModernTable()) {
+      const marker = document.querySelector('#commodity-app .jb-table-scroll__foot');
+      return progress.total !== null && !findLoadMoreButton() &&
+        cleanText(marker?.textContent).includes('載入完成');
+    }
     return Array.from(document.querySelectorAll('.loading-indicator')).some(
       (indicator) => cleanText(indicator.textContent).includes('載入完成')
     );
@@ -561,10 +609,18 @@
       throw new Error('商品載入尚未完成');
     }
 
-    if (progress.total !== null && progress.loaded < progress.total) {
+    if (progress.total !== null && progress.loaded !== progress.total) {
       throw new Error(`商品尚未全部載入（${progress.loaded}/${progress.total}）`);
     }
 
+    if (getModernTable()) {
+      const ids = getProductNames().map((name) => cleanText(
+        getModernProductRow(name)?.querySelector('[data-jb-cell="head"]')?.textContent
+      ));
+      if (ids.some((id) => !/^\d+$/.test(id)) || new Set(ids).size !== ids.length) {
+        throw new Error('商品序號缺漏或重複，請重新搜尋後再試');
+      }
+    }
     return { ...progress, loadCount };
   }
 
@@ -581,7 +637,7 @@
   }
 
   function getCollapsedInventoryControls() {
-    return Array.from(document.querySelectorAll('p.name'))
+    return getProductNames()
       .map((nameElement) => {
         const icon = nameElement.parentElement?.querySelector(
           'svg[data-testid="ExpandCircleDownIcon"]'
@@ -605,6 +661,11 @@
   }
 
   async function expandAllProducts() {
+    if (getModernTable()) {
+      // 新版款式已直接顯示；核對明細數量，不點擊商品功能按鈕。
+      for (const name of getProductNames()) readModernInventoryRows(name);
+      return { expandedCount: 0, expandableCount: 0 };
+    }
     const initialCount = getCollapsedInventoryControls().length;
     let expandedCount = 0;
 
@@ -655,8 +716,11 @@
       const loadResult = await loadAllProducts();
       const expandResult = await expandAllProducts();
 
+      const detail = getModernTable()
+        ? '款式明細已確認'
+        : `展開 ${expandResult.expandedCount} 個`;
       showStatus(
-        `準備完成：${loadResult.loaded} 個商品，展開 ${expandResult.expandedCount} 個`
+        `準備完成：${loadResult.loaded} 個商品，${detail}`
       );
     } catch (error) {
       console.error('[Jambo 商品庫存] 載入或展開失敗', error);
@@ -685,8 +749,44 @@
 
   function getProductImageUrl(nameElement) {
     const productRow = nameElement.closest('tr');
-    const image = productRow?.querySelector('img.photo');
-    return image?.currentSrc || image?.src || '';
+    const image = getModernProductRow(nameElement)
+      ? productRow.querySelector('[data-jb-cell="title"] img')
+      : productRow?.querySelector('img.photo');
+    return image?.getAttribute('data-jb-zoom') || image?.currentSrc || image?.src || '';
+  }
+
+  function readModernInventoryRows(nameElement) {
+    const row = getModernProductRow(nameElement);
+    const name = getProductName(nameElement);
+    const stockCell = row?.querySelector(':scope > [data-label="總庫存/樣式"]');
+    const calledCell = row?.querySelector(':scope > [data-jb-col="sales-ordered"]');
+    if (!stockCell || !calledCell) throw new Error(`商品「${name}」缺少庫存或已喊標欄位；請在清單設定顯示這些欄位`);
+    const numberText = (element) => {
+      const value = cleanText(element?.textContent);
+      if (!/^(?:[+-]?(?:\d+|\d{1,3}(?:,\d{3})+)|XX)$/iu.test(value)) {
+        throw new Error(`商品「${name}」庫存或已喊標數值無法辨識：${value || '空白'}`);
+      }
+      return value;
+    };
+    const totalStock = numberText(stockCell.querySelector(':scope > .u-nowrap .u-font-semibold'));
+    const totalCalled = numberText(calledCell.querySelector(':scope > .u-nowrap .u-font-semibold'));
+    const stockLines = Array.from(stockCell.querySelectorAll(':scope > .jb-rowlines > div'));
+    const calledLines = Array.from(calledCell.querySelectorAll(':scope > .jb-rowlines > div'));
+    const caption = cleanText(nameElement.querySelector('.jb-caption')?.textContent);
+    const expected = caption.match(/^(\d+)\s*個樣式$/u);
+    if ((caption && !expected) || stockLines.length !== calledLines.length ||
+        stockLines.length !== (expected ? Number(expected[1]) : 0)) {
+      throw new Error(`商品「${name}」款式明細不完整，請重新載入後再試`);
+    }
+    const rows = [['全部', totalStock, totalCalled]];
+    const styles = new Set();
+    stockLines.forEach((line, index) => {
+      const style = cleanText(line.querySelector(':scope > [title]')?.textContent);
+      if (!style || style === '全部' || styles.has(style)) throw new Error(`商品「${name}」樣式名稱缺漏或重複`);
+      styles.add(style);
+      rows.push([style, numberText(line.lastElementChild), numberText(calledLines[index].querySelector('span'))]);
+    });
+    return rows;
   }
 
   function extractInventory() {
@@ -694,13 +794,14 @@
     const productGroups = [];
     const catalogProducts = [];
     const skippedProducts = [];
-    const productNames = Array.from(document.querySelectorAll('p.name'));
+    const productNames = getProductNames();
 
     for (const nameElement of productNames) {
-      const productName = cleanText(nameElement.textContent);
+      const productName = getProductName(nameElement);
+      const modernRow = getModernProductRow(nameElement);
       const inventoryTable = findInventoryTable(nameElement);
 
-      const dataRows = inventoryTable
+      const dataRows = modernRow ? readModernInventoryRows(nameElement) : inventoryTable
         ? Array.from(inventoryTable.querySelectorAll('tbody tr'))
             .map((row) =>
               getDirectCells(row, 'TD').map((cell) =>
@@ -717,7 +818,7 @@
       );
       catalogProducts.push(catalogProduct);
 
-      if (!inventoryTable) {
+      if (!modernRow && !inventoryTable) {
         skippedProducts.push(productName || '(未命名商品)');
         continue;
       }
