@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee 多場結單通知
 // @namespace    local.shopee.settlement-notice
-// @version      0.2.0
+// @version      0.2.1
 // @description  自訂通知文字，匯入任意已確認買家 Excel，合併去重後手動核對並逐筆通知
 // @match        https://seller.shopee.tw/new-webchat/conversations*
 // @require      https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js
@@ -14,7 +14,7 @@
 /* global ExcelJS, GM_getValue, GM_setValue, GM_registerMenuCommand, module */
 (function settlementNotice() {
   "use strict";
-  const VERSION = "0.2.0";
+  const VERSION = "0.2.1";
   const STORE = Object.freeze({ config: "settlement:config:v1", records: "settlement:records:v1", panelPosition: "settlement:panel-position:v1", batch: "settlement:batch:v1" });
   const DEFAULT_CONFIG = Object.freeze({
     template: "您好，感謝您於10/08～10/11期間於采兒直播間喊單，今天是10/12結單日，提醒您這期間購買的商品要一起結單呦！",
@@ -71,11 +71,27 @@
     const converted = /^(?:\d+-(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)(?:-\d{2})?|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)-\d{2}|\d+月\d+日|\d{4}\/\d{1,2}\/\d{1,2}|[+-]?\d+(?:\.\d+)?E[+-]\d+|\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})|TRUE|FALSE|#NAME\?|#VALUE!|#REF!|#DIV\/0!|#N\/A|#NUM!|#NULL!)$/u.test(text);
     return { ok: extracted.ok && !converted, text };
   }
+  // 只辨識優惠表版本標記；通知不計算或驗證優惠規則。
+  function hasComboTitle(workbook) {
+    const value = workbook.getWorksheet("設定與價格")?.getCell("N1").value;
+    const text = typeof value === "string" ? value : value && typeof value === "object" &&
+      Object.keys(value).length === 1 && Array.isArray(value.richText) &&
+      value.richText.every(part => typeof part?.text === "string")
+      ? value.richText.map(part => part.text).join("") : null;
+    return text === "本場優惠 v1";
+  }
   function extractConfirmed(workbook, filename) {
     const sheet = workbook.getWorksheet("已確認");
     if (!sheet || norm(sheet.getCell(5, 1).text) !== "買家帳號") throw problem("WORKBOOK", `${filename}：找不到「已確認」或 A5「買家帳號」，請使用聊聊明細發送表。`);
-    const accounts = [], issues = [];
+    const accounts = [], issues = [], markerRows = [];
+    const hasCombo = hasComboTitle(workbook);
     for (let row = 6; row <= sheet.rowCount; row++) {
+      const blank = value => value == null || value === "";
+      if (hasCombo && sheet.getCell(row, 2).value === "組合優惠" &&
+          [1, 6, 7].every(col => blank(sheet.getCell(row, col).value))) {
+        markerRows.push(row);
+        continue;
+      }
       const value = sheet.getCell(row, 1).value;
       const result = validateBuyerAccount(value);
       const hasOrder = [2, 3, 4, 5, 6, 7].some(col => sheet.getCell(row, col).value != null && sheet.getCell(row, col).value !== "");
@@ -84,7 +100,7 @@
       else if (result.text) accounts.push({ account: result.text, row });
     }
     if (issues.length) throw problem("ACCOUNT", issues.join("\n"));
-    return { accounts, sourceRows: accounts.length, uniqueCount: new Set(accounts.map(item => item.account)).size };
+    return { accounts, sourceRows: accounts.length, uniqueCount: new Set(accounts.map(item => item.account)).size, markerRows };
   }
   async function readWorkbook(buffer, filename) {
     if (typeof ExcelJS === "undefined") throw problem("EXCELJS", "Excel 元件尚未載入，請重新整理頁面。");

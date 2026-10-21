@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "publishedAt": "2026-10-20T12:56:08.344Z",
+  "publishedAt": "2026-10-21T07:35:57.345Z",
   "scripts": [
     {
       "id": "fb-inbox-finder",
@@ -86,11 +86,21 @@
       "id": "shopee-settlement-notice",
       "name": "Shopee 多場結單通知",
       "namespace": "local.shopee.settlement-notice",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "file": "scripts/shopee-settlement-notice.user.js",
-      "sha256": "e2fa0c8539024e329e6149f551518d477f72989b38d07ca28e01fc962afbe846",
-      "bytes": 46495,
-      "updatedAt": "2026-10-15T02:35:13.873Z"
+      "sha256": "32442517f6867e83879e48341a23f94b736c6b927e5e33e9ef466733975532c7",
+      "bytes": 47366,
+      "updatedAt": "2026-10-21T07:35:57.345Z"
+    },
+    {
+      "id": "shopee-unsettled-check",
+      "name": "Shopee 未結標查詢",
+      "namespace": "local.shopee.unsettled-check",
+      "version": "0.1.1",
+      "file": "scripts/shopee-unsettled-check.user.js",
+      "sha256": "d57ba4e8584a52629851c0e1719b3b155d667bb668ada5cc2da4f7e44300d722",
+      "bytes": 102844,
+      "updatedAt": "2026-10-21T07:35:57.345Z"
     }
   ]
 }
