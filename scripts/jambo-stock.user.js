@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jambo 商品庫存
 // @namespace    https://jambolive.tv/
-// @version      2.1.3
+// @version      2.1.4
 // @description  獨立匯出含圖片、成本價與直購價的商品庫存及五欄商品清單 XLSX
 // @match        https://jambolive.tv/console/commodity/*
 // @require      https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js
@@ -16,7 +16,6 @@
   if (!window.location.pathname.startsWith('/console/commodity/')) return;
 
   const PANEL_ID = 'jambo-inventory-export-panel';
-  const SCRIPT_VERSION = '2.1.3';
   const PANEL_POSITION_STORAGE_KEY = 'jambo-inventory-panel-position-v1';
   const PREPARE_BUTTON_ID = 'jambo-load-expand-all';
   const LOAD_MORE_LABEL = '載入更多';
@@ -1574,7 +1573,7 @@
       'right:18px',
       'bottom:18px',
       'z-index:2147483647',
-      'width:220px',
+      'width:180px',
       'padding:12px',
       'border:1px solid #d0d5dd',
       'border-radius:12px',
@@ -1588,7 +1587,7 @@
       'display:flex;align-items:center;justify-content:space-between;gap:8px';
 
     const title = document.createElement('div');
-    title.textContent = `Jambo 商品庫存 v${SCRIPT_VERSION}`;
+    title.textContent = 'Jambo 商品庫存';
     title.style.cssText =
       'font-size:15px;font-weight:800;color:#101828;white-space:nowrap';
 
@@ -1650,7 +1649,7 @@
       const isCollapsed = panel.dataset.collapsed === '1';
       panel.dataset.collapsed = isCollapsed ? '0' : '1';
       body.style.display = isCollapsed ? 'block' : 'none';
-      panel.style.width = isCollapsed ? '250px' : '220px';
+      panel.style.width = isCollapsed ? '250px' : '180px';
       toggleButton.textContent = isCollapsed ? '−' : '+';
       toggleButton.title = isCollapsed ? '收合面板' : '展開面板';
       toggleButton.setAttribute(
