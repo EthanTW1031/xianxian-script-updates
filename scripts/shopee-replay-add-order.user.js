@@ -1,12 +1,14 @@
 // ==UserScript==
 // @name         Shopee 回放加單
 // @namespace    local.shopee.replay-add-order
-// @version      0.1.7
+// @version      0.2.3
 // @description  只讀聊聊回放加單，使用直播解析器，選 JAMBO 匯出檔讀商品清單，輸出獨立回放 CSV 與核對清單
 // @match        https://seller.shopee.tw/new-webchat/conversations*
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_registerMenuCommand
+// @grant        GM_xmlhttpRequest
+// @connect      self
 // @run-at       document-idle
 // ==/UserScript==
 
@@ -101,9 +103,9 @@ return module.exports;}).call(globalThis);
     mod
   ));
 
-  // src/util.cjs
+  // ../../../shopee_未結鏢客人/新客限購_候選_v1.3_20261022/chat/src/util.cjs
   var require_util = __commonJS({
-    "src/util.cjs"(exports, module) {
+    "../../../shopee_未結鏢客人/新客限購_候選_v1.3_20261022/chat/src/util.cjs"(exports, module) {
       "use strict";
       var TaskError = class extends Error {
         constructor(code, message) {
@@ -146,9 +148,9 @@ return module.exports;}).call(globalThis);
     }
   });
 
-  // src/replay-core.cjs
+  // ../../../shopee_未結鏢客人/新客限購_候選_v1.3_20261022/chat/src/replay-core.cjs
   var require_replay_core = __commonJS({
-    "src/replay-core.cjs"(exports, module) {
+    "../../../shopee_未結鏢客人/新客限購_候選_v1.3_20261022/chat/src/replay-core.cjs"(exports, module) {
       "use strict";
       var { problem, ordinal, decimal, safeUid, compareIds } = require_util();
       var HEADERS = Object.freeze(["擷取時間", "直播Session", "限定時段序號", "留言ID", "買家UID", "買家帳號", "原始留言", "正規化留言", "商品代號", "品名", "規格尺寸", "數量", "價格", "狀態", "待確認", "來源", "喊單則數", "彙總件數"]);
@@ -374,9 +376,9 @@ return module.exports;}).call(globalThis);
     }
   });
 
-  // src/chat-runtime.cjs
+  // ../../../shopee_未結鏢客人/新客限購_候選_v1.3_20261022/chat/src/chat-runtime.cjs
   var require_chat_runtime = __commonJS({
-    "src/chat-runtime.cjs"(exports, module) {
+    "../../../shopee_未結鏢客人/新客限購_候選_v1.3_20261022/chat/src/chat-runtime.cjs"(exports, module) {
       "use strict";
       var { problem, norm, decimal, safeUid, compareIds, canonical } = require_util();
       var LOCK_NAME = "shopee-settlement-notice:send";
@@ -442,7 +444,7 @@ return module.exports;}).call(globalThis);
         const mouse = { bubbles: true, cancelable: true, composed: true, clientX, clientY, button: 0, buttons: 1, detail: 1 }, pointer = { ...mouse, pointerId: 1, pointerType: "mouse", isPrimary: true, width: 1, height: 1, pressure: 0.5 };
         target.focus?.();
         const P = typeof PointerEvent === "function" ? PointerEvent : MouseEvent;
-        for (const [name, C, init] of [["pointerover", P, pointer], ["mouseover", MouseEvent, mouse], ["pointerdown", P, pointer], ["mousedown", MouseEvent, mouse], ["pointerup", P, { ...pointer, buttons: 0 }], ["mouseup", MouseEvent, { ...mouse, buttons: 0 }], ["click", MouseEvent, { ...mouse, buttons: 0 }]]) target.dispatchEvent(new C(name, init));
+        for (const [name, C, init2] of [["pointerover", P, pointer], ["mouseover", MouseEvent, mouse], ["pointerdown", P, pointer], ["mousedown", MouseEvent, mouse], ["pointerup", P, { ...pointer, buttons: 0 }], ["mouseup", MouseEvent, { ...mouse, buttons: 0 }], ["click", MouseEvent, { ...mouse, buttons: 0 }]]) target.dispatchEvent(new C(name, init2));
       }
       function fiberOf(node) {
         const key = Object.keys(node || {}).find((k) => k.startsWith("__reactFiber$"));
@@ -702,7 +704,7 @@ return module.exports;}).call(globalThis);
           if (typeof target !== "string" || !target.trim()) throw problem("SEARCH_INPUT", "搜尋關鍵字不能空白。");
           await ensureScope(mode, stop);
           const input = inputElement(), s = currentStore(), initial = searchFrame(s, branch), filter = initial.filter;
-          let phase = "clear", complete = null, failure = null, active = true, sawBranch = !!initial.branch, expectedInput = "";
+          let phase2 = "clear", complete = null, failure = null, active = true, sawBranch = !!initial.branch, expectedInput = "";
           const check = () => {
             if (!active) return;
             try {
@@ -716,21 +718,21 @@ return module.exports;}).call(globalThis);
                 return;
               }
               sawBranch = true;
-              if (phase === "clear") {
-                if (f.keyword === "") phase = "cleared";
+              if (phase2 === "clear") {
+                if (f.keyword === "") phase2 = "cleared";
                 return;
               }
-              if (phase === "cleared") return;
-              if (phase === "reset") {
+              if (phase2 === "cleared") return;
+              if (phase2 === "reset") {
                 if (f.keyword !== "" && f.keyword !== target) throw problem("SEARCH_UNRELIABLE", "搜尋關鍵字被改掉，已停止本輪。");
-                if (f.keyword === target && f.branch.status === "" && f.branch.results.length === 0) phase = "result";
+                if (f.keyword === target && f.branch.status === "" && f.branch.results.length === 0) phase2 = "result";
                 return;
               }
-              if (phase === "result") {
+              if (phase2 === "result") {
                 if (f.keyword !== target) throw problem("SEARCH_UNRELIABLE", "搜尋關鍵字中途變動，已停止本輪。");
                 if (f.branch.status === "succeed") {
                   complete = { results: projectResults(f.branch.results, branch), hasMore: f.branch.hasMore, filter };
-                  phase = "complete";
+                  phase2 = "complete";
                 }
               }
             } catch (e) {
@@ -744,9 +746,9 @@ return module.exports;}).call(globalThis);
             await wait(() => {
               check();
               if (failure) throw failure;
-              return phase === "cleared";
+              return phase2 === "cleared";
             }, timing.query, stop, "SEARCH_CLEAR_UNFINISHED", "清空搜尋框未完成，頁面搜尋沒有回應，已停止；本位尚未查詢，沒有記錄結果。");
-            phase = "reset";
+            phase2 = "reset";
             expectedInput = target;
             nativeSearchValue(input, target);
             await wait(() => {
@@ -867,9 +869,9 @@ return module.exports;}).call(globalThis);
     }
   });
 
-  // src/jambo-catalog.cjs
+  // ../../../shopee_未結鏢客人/新客限購_候選_v1.3_20261022/chat/src/jambo-catalog.cjs
   var require_jambo_catalog = __commonJS({
-    "src/jambo-catalog.cjs"(exports, module) {
+    "../../../shopee_未結鏢客人/新客限購_候選_v1.3_20261022/chat/src/jambo-catalog.cjs"(exports, module) {
       "use strict";
       var { problem, ordinal } = require_util();
       var SHEET = "五欄商品清單";
@@ -983,9 +985,9 @@ ${lines.join("\n")}`;
     }
   });
 
-  // src/panel.cjs
+  // ../../../shopee_未結鏢客人/新客限購_候選_v1.3_20261022/chat/src/panel.cjs
   var require_panel = __commonJS({
-    "src/panel.cjs"(exports, module) {
+    "../../../shopee_未結鏢客人/新客限購_候選_v1.3_20261022/chat/src/panel.cjs"(exports, module) {
       "use strict";
       var { safeMessage } = require_util();
       var BASE_CSS = `:host{all:initial;font:14px/1.5 "Microsoft JhengHei",sans-serif;color:#26354b}*{box-sizing:border-box}.panel{position:fixed;width:360px;max-width:calc(100vw - 24px);max-height:78vh;background:#fff;border:1px solid #bac7d8;border-radius:10px;box-shadow:0 6px 28px #0003;z-index:2147483646;overflow:hidden}header{display:flex;justify-content:space-between;align-items:center;padding:10px 12px;cursor:grab;touch-action:none;color:#fff}header button{background:#ffffff22;color:#fff;border:0}.body{padding:12px;max-height:calc(78vh - 44px);overflow:auto}.closed .body,.hidden{display:none}label{display:block;margin:7px 0}textarea,input,select,button{font:inherit}textarea,input:not([type=checkbox]),select{width:100%;padding:6px;border:1px solid #aebccd;border-radius:5px}textarea{min-height:85px;resize:vertical}button{padding:6px 9px;border:1px solid #b6c4d6;border-radius:5px;background:#f5f8fc;cursor:pointer}button:disabled{opacity:.5;cursor:default}.actions{display:flex;gap:6px;flex-wrap:wrap;margin:10px 0}.primary{background:#176e63;color:#fff}.danger{background:#b43030;color:white}.status,.mini,pre{white-space:pre-wrap;overflow-wrap:anywhere}.mini{font-size:12px;color:#596b81}.error{color:#aa2525}pre{max-height:145px;overflow:auto;background:#eef4fa;padding:7px;margin:7px 0}.check{display:flex;gap:7px;align-items:start}.stop{position:sticky;bottom:0;width:100%}`;
@@ -1084,16 +1086,17 @@ ${lines.join("\n")}`;
     }
   });
 
-  // src/replay-ui.cjs
+  // ../../../shopee_未結鏢客人/新客限購_候選_v1.3_20261022/chat/src/replay-ui.cjs
   var require_replay_ui = __commonJS({
-    "src/replay-ui.cjs"(exports, module) {
+    "../../../shopee_未結鏢客人/新客限購_候選_v1.3_20261022/chat/src/replay-ui.cjs"(exports, module) {
       "use strict";
       var chat2 = require_chat_runtime();
       var { problem, safeMessage } = require_util();
       var { mountPanel, gmAdapter } = require_panel();
-      var VERSION = "0.1.7";
+      var VERSION = "0.2.3";
       var STORE = Object.freeze({ config: "replay:config:v1", panelPosition: "replay:panel-position:v1" });
-      async function initReplay(core2, jambo2) {
+      async function initReplay(core2, jambo2, onFormalSuccess = async () => {
+      }) {
         const gm = gmAdapter(), ui2 = mountPanel({ attribute: "data-replay-add-order", title: `回放加單 v${VERSION}（只讀）`, colour: "#86501a", position: { left: Math.min(Math.round(innerWidth * 0.55), Math.max(18, innerWidth - 380)), top: 80 }, gm, positionKey: STORE.panelPosition, html: `
     <label>本期標題<input data-title></label><label>截止日期時間（台北）<input data-cutoff type="datetime-local" step="1"></label>
     <label>本場商品清單（JAMBO 匯出的庫存檔 .xlsx）<input data-catalog-file type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"></label><p data-catalog-status class="mini">請選這一場的 JAMBO 匯出檔；只讀裡面的「五欄商品清單」工作表。</p><p data-preview class="mini"></p>
@@ -1273,6 +1276,7 @@ ${config.codes.length} 個商品（${config.codes[0]}～${config.codes.at(-1)}�
             state.running = false;
             controls();
           }
+          if (!state.stop && state.result?.canExport) await onFormalSuccess();
         });
         $("[data-export-orders]").addEventListener("click", () => {
           if (state.running || !state.result?.canExport) return;
@@ -1302,7 +1306,736 @@ ${config.codes.length} 個商品（${config.codes[0]}～${config.codes.at(-1)}�
     }
   });
 
-  // vendor/live-capture/parser.js
+  // ../../../shopee_未結鏢客人/新客限購_候選_v1.3_20261022/chat/src/precheck-core.cjs
+  var require_precheck_core = __commonJS({
+    "../../../shopee_未結鏢客人/新客限購_候選_v1.3_20261022/chat/src/precheck-core.cjs"(exports, module) {
+      "use strict";
+      var { problem, norm, clone } = require_util();
+      var HEADERS = Object.freeze(["擷取時間", "直播Session", "限定時段序號", "留言ID", "買家UID", "買家帳號", "原始留言", "正規化留言", "商品代號", "品名", "規格尺寸", "數量", "價格", "狀態", "待確認", "來源", "喊單則數", "彙總件數"]);
+      function effectiveBuyerText(value) {
+        if (value == null) return { ok: true, text: "" };
+        if (typeof value === "string") return { ok: true, text: value };
+        if (typeof value !== "object" || Object.prototype.toString.call(value) === "[object Date]") return { ok: false, text: "" };
+        if (Object.hasOwn(value, "formula") || Object.hasOwn(value, "sharedFormula")) return { ok: typeof value.result === "string", text: typeof value.result === "string" ? value.result : "" };
+        if (typeof value.text === "string") return { ok: true, text: value.text };
+        if (Array.isArray(value.richText) && value.richText.every((part) => typeof part?.text === "string")) return { ok: true, text: value.richText.map((part) => part.text).join("") };
+        return { ok: false, text: "" };
+      }
+      function validateBuyerAccount(value) {
+        const extracted = effectiveBuyerText(value);
+        let text = extracted.text.trim();
+        const wrapped = text.match(/^="((?:[^"]|"")*)"$/u);
+        if (wrapped) text = wrapped[1].replace(/""/gu, '"');
+        text = norm(text);
+        const converted = /^(?:\d+-(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)(?:-\d{2})?|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)-\d{2}|\d+月\d+日|\d{4}\/\d{1,2}\/\d{1,2}|[+-]?\d+(?:\.\d+)?E[+-]\d+|\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})|TRUE|FALSE|#NAME\?|#VALUE!|#REF!|#DIV\/0!|#N\/A|#NUM!|#NULL!)$/u.test(text);
+        return { ok: extracted.ok && !converted, text };
+      }
+      function parseBlacklist(value) {
+        const lines = Array.isArray(value) ? value : String(value ?? "").split(/\r?\n/u);
+        const accounts = lines.map((line) => validateBuyerAccount(line));
+        if (accounts.some((account) => !account.ok || /\s/u.test(account.text))) throw problem("BLACKLIST", "黑名單請每行填一個完整買家帳號，不可使用日期、科學記號或含空白的帳號。");
+        return [...new Set(accounts.map((account) => account.text).filter(Boolean))];
+      }
+      function splitCsv(text) {
+        const source = String(text).replace(/^\uFEFF/u, ""), records = [];
+        let fields = [], field = "", quoted = false, start = 0;
+        function push(end, ending = "") {
+          fields.push(field.replace(/\r$/u, ""));
+          records.push({ raw: source.slice(start, end), ending, fields, row: records.length + 1 });
+          fields = [];
+          field = "";
+        }
+        for (let i = 0; i < source.length; i++) {
+          const ch = source[i];
+          if (quoted) {
+            if (ch === '"' && source[i + 1] === '"') {
+              field += '"';
+              i++;
+            } else if (ch === '"') quoted = false;
+            else field += ch;
+          } else if (ch === '"') quoted = true;
+          else if (ch === ",") {
+            fields.push(field);
+            field = "";
+          } else if (ch === "\n") {
+            const end = i > start && source[i - 1] === "\r" ? i - 1 : i;
+            push(end, source.slice(end, i + 1));
+            start = i + 1;
+          } else field += ch;
+        }
+        if (quoted) throw problem("CSV_QUOTE", "直播 CSV 有未閉合的雙引號，請使用抓單匯出的原檔。");
+        if (start < source.length) push(source.length);
+        return records;
+      }
+      var blankRecord = (record) => !record.fields.some((cell) => String(cell).trim());
+      function parseSource(buffer, filename) {
+        if (!/\.csv$/iu.test(filename) || filename.startsWith("~$")) throw problem("FILE", "請選擇 .csv 直播原始檔，勿選 Excel 暫存鎖定檔。");
+        const bytes = buffer instanceof Uint8Array ? new Uint8Array(buffer) : new Uint8Array(buffer);
+        let text;
+        try {
+          text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+        } catch {
+          throw problem("UTF8", "檔案不是合法的 UTF-8，可能被 Excel 另存過，請用抓單匯出的原檔。");
+        }
+        const records = splitCsv(text);
+        if (!records.length) throw problem("EMPTY", "檔案是空的，請選擇抓單匯出的原檔。");
+        const actual = records[0].fields.map((value) => value.trim());
+        if (![HEADERS.length, HEADERS.length + 1].includes(actual.length) || HEADERS.some((value, i) => actual[i] !== value) || actual.length === HEADERS.length + 1 && actual.at(-1) !== "喊單歷程") throw problem("HEADERS", `表頭必須是直播固定 18 欄，或在其後加第 19 欄「喊單歷程」，且順序相同。實際表頭：${actual.join("｜") || "（空白）"}`);
+        let sourceRows = 0, inactiveRows = 0, emptyAccountRows = 0;
+        const active = /* @__PURE__ */ new Set(), rowCounts = /* @__PURE__ */ new Map(), issues = [];
+        for (const record of records.slice(1)) {
+          if (blankRecord(record)) continue;
+          sourceRows++;
+          if (record.fields.length !== actual.length) throw problem("WIDTH", `第 ${record.row} 列不是 ${actual.length} 格（實際 ${record.fields.length} 格），整份未匯入。`);
+          const account = validateBuyerAccount(record.fields[5]);
+          if (!account.ok) issues.push(`第 ${record.row} 列：帳號疑似被 Excel 轉型，請核對抓單匯出的原檔。`);
+          record.account = account.text;
+          if (account.text) rowCounts.set(account.text, (rowCounts.get(account.text) || 0) + 1);
+          const inactive = record.fields[13].trim() === "inactiveCode";
+          if (inactive) inactiveRows++;
+          if (!account.text) emptyAccountRows++;
+          if (!inactive && account.text) active.add(account.text);
+        }
+        if (issues.length) throw problem("ACCOUNT", issues.join("\n"));
+        if (!sourceRows) throw problem("EMPTY", "檔案只有表頭，沒有資料列，整份未匯入。");
+        const accounts = [...active].sort((a, b) => a.localeCompare(b, "zh-Hant", { numeric: true }));
+        return { name: filename, bytes, text, records, accounts, rowCounts, sourceRows, inactiveRows, emptyAccountRows, bom: text.startsWith("\uFEFF"), newline: /\r?\n/u.exec(text)?.[0] || "\n", trailing: text.endsWith("\n") };
+      }
+      async function readSource(buffer, filename) {
+        const entry = parseSource(buffer, filename);
+        const hash = await crypto.subtle.digest("SHA-256", entry.bytes);
+        entry.hash = [...new Uint8Array(hash)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+        return entry;
+      }
+      function batchId(hash, round) {
+        return `precheck:${hash}:${round}`;
+      }
+      function recordKey(scope, account) {
+        return JSON.stringify([scope, account]);
+      }
+      function recordState(records, scope, account) {
+        return records[recordKey(scope, account)]?.status || "ready";
+      }
+      function pruneFiles(files, records, entry) {
+        const prior = files.entries.find((file) => file.hash === entry.hash);
+        const updated = { hash: entry.hash, round: prior?.round || 0, name: entry.name, usedAt: (/* @__PURE__ */ new Date()).toISOString() };
+        const entries = [updated, ...files.entries.filter((file) => file.hash !== entry.hash)].slice(0, 20);
+        const retained = new Set(entries.map((file) => file.hash)), nextRecords = {};
+        for (const [key, record] of Object.entries(records)) {
+          const hash = /^precheck:([a-f0-9]{64}):\d+$/u.exec(record.batchId)?.[1];
+          if (retained.has(hash)) nextRecords[key] = record;
+        }
+        return { files: { ...files, entries }, records: nextRecords, round: updated.round };
+      }
+      function toCsv(rows) {
+        return "\uFEFF" + rows.map((row, rowIndex) => row.map((value, colIndex) => {
+          let text = String(value ?? "");
+          if (rowIndex > 0 && colIndex === 0) text = `="${text.replace(/"/gu, '""')}"`;
+          else if (/^[=+@\-\t\r]/u.test(text)) text = `'${text}`;
+          return `"${text.replace(/"/gu, '""')}"`;
+        }).join(",")).join("\r\n");
+      }
+      var LEGACY_LABELS = Object.freeze({ ready: "還沒查", sent: "已送出（舊）", manualSent: "已人工送出（舊）", blocked: "黑名單排除", searchUnconfirmed: "搜尋未確認", notFound: "搜尋未確認（舊）", pending: "舊的可能已送出，待重新查", draft: "舊的有草稿，待重新查", failed: "失敗，可再查" });
+      var LABELS = Object.freeze({ ...LEGACY_LABELS, found: "找得到，留", chatBlocked: "聊聊已封鎖" });
+      var RETRYABLE = Object.freeze(["ready", "failed", "pending", "draft"]);
+      function itemState(queue, records, item) {
+        return queue.blacklist?.includes(item.account) ? "blocked" : recordState(records, queue.batchId, item.account);
+      }
+      function buildQueue(entry, _unused = null, round = 0, blacklist = []) {
+        return { batchId: batchId(entry.hash, round), blacklist: parseBlacklist(blacklist), items: entry.accounts.map((account) => ({ account, rowCount: entry.rowCounts.get(account) || 0 })) };
+      }
+      function runnableItems(queue, records) {
+        return queue.items.filter((i) => RETRYABLE.includes(itemState(queue, records, i)));
+      }
+      function bucket(queue, records, item) {
+        const state = itemState(queue, records, item), r = records[recordKey(queue.batchId, item.account)];
+        if (state === "blocked") return "blacklist";
+        if (state === "chatBlocked") return "chatBlocked";
+        if (state === "found") return "found";
+        if (state === "manualSent") return r?.code === "MANUAL_FOUND" ? "manualFound" : "legacySent";
+        if (state === "sent") return "legacySent";
+        if (["notFound", "searchUnconfirmed"].includes(state)) return "searchUnconfirmed";
+        if (RETRYABLE.includes(state)) return "unchecked";
+        throw problem("RECORDS", "預檢紀錄狀態不支援，已停止。");
+      }
+      function displayLabel(queue, records, item) {
+        return itemState(queue, records, item) === "manualSent" && records[recordKey(queue.batchId, item.account)]?.code === "MANUAL_FOUND" ? "人工確認找得到" : LABELS[itemState(queue, records, item)];
+      }
+      function countsFor(queue, records) {
+        const out = Object.fromEntries(Object.keys(LABELS).map((k) => [k, 0]));
+        for (const i of queue.items) out[itemState(queue, records, i)]++;
+        return out;
+      }
+      function summary(queue, records) {
+        const out = { found: 0, manualFound: 0, legacySent: 0, chatBlocked: 0, searchUnconfirmed: 0, blacklist: 0, unchecked: 0 };
+        for (const i of queue.items) out[bucket(queue, records, i)]++;
+        out.total = queue.items.length;
+        out.accepted = out.found + out.manualFound + out.legacySent;
+        out.completed = out.total - out.unchecked;
+        return out;
+      }
+      function summaryText(s) {
+        return `找得到 ${s.found} 位、人工確認找得到 ${s.manualFound} 位、舊紀錄已送出 ${s.legacySent} 位、聊聊已封鎖 ${s.chatBlocked} 位、搜尋未確認 ${s.searchUnconfirmed} 位、黑名單 ${s.blacklist} 位、還沒查 ${s.unchecked} 位。`;
+      }
+      function streakWarning(queue, records) {
+        let n = 0, max = 0;
+        for (const i of queue.items) {
+          n = bucket(queue, records, i) === "searchUnconfirmed" ? n + 1 : 0;
+          max = Math.max(n, max);
+        }
+        return max >= 3 ? `有 ${max} 位連續搜尋未確認，請核對網路與搜尋畫面，再決定手動重查。` : "";
+      }
+      function listCsv(queue, records) {
+        const priority = { blacklist: 0, chatBlocked: 0, searchUnconfirmed: 1, unchecked: 2, found: 3, manualFound: 3, legacySent: 3 };
+        const items = [...queue.items].sort((a, b) => priority[bucket(queue, records, a)] - priority[bucket(queue, records, b)]);
+        return toCsv([["買家帳號", "這位在檔裡有幾列", "狀態", "說明", "時間"], ...items.map((i) => {
+          const r = records[recordKey(queue.batchId, i.account)];
+          return [i.account, i.rowCount, displayLabel(queue, records, i), itemState(queue, records, i) === "blocked" ? "本腳本黑名單排除" : r?.detail || "", r?.time || ""];
+        })]);
+      }
+      function exportPartition(entry, queue, records, pendingOnly = false) {
+        if (!queue.items.length) throw problem("QUEUE", "檔案沒有可預檢的買家。");
+        const s = summary(queue, records), excluded = new Set(queue.blacklist || []), accepted = /* @__PURE__ */ new Set();
+        for (const i of queue.items) {
+          const b = bucket(queue, records, i);
+          if (["blacklist", "chatBlocked"].includes(b)) excluded.add(i.account);
+          if (["found", "manualFound", "legacySent"].includes(b)) accepted.add(i.account);
+        }
+        const select = (r) => !excluded.has(r.account) && (pendingOnly ? !accepted.has(r.account) : accepted.has(r.account));
+        const kept = entry.records.filter((r, index) => index === 0 || blankRecord(r) || select(r));
+        if (!kept.slice(1).some((r) => !blankRecord(r))) throw problem(pendingOnly ? "NO_PENDING" : "NO_CONFIRMED", pendingOnly ? "沒有待處理資料。" : "沒有預檢通過的買家，不能產生叫貨用檔。");
+        const removedRows = entry.records.length - kept.length, text = removedRows ? (entry.bom ? "\uFEFF" : "") + kept.map((r) => r.raw + r.ending).join("") : entry.text;
+        const check = splitCsv(text);
+        if (check.length !== kept.length || check.some((r, i) => r.raw !== kept[i].raw || r.ending !== kept[i].ending || i > 0 && !blankRecord(r) && !select({ account: validateBuyerAccount(r.fields[5]).text }))) throw problem("EXPORT_CHECK", "匯出自我檢查未通過，沒有下載；請保留原檔。");
+        const excludedRows = entry.records.filter((r) => excluded.has(r.account)).length;
+        const confirmation = [pendingOnly ? "這是待處理直播檔，請勿拿來叫貨。" : "這是預檢通過的直播檔，供控貨助手建立新場次。", summaryText(s), `排除 ${excludedRows} 列；此檔保留 ${kept.slice(1).filter((r) => !blankRecord(r)).length} 列。原檔不修改。`, s.unchecked ? "還沒查完；後續查完須重新匯出，並用新檔另建場次。" : "", streakWarning(queue, records), "確定匯出？"].filter(Boolean).join("\n");
+        return { text, bytes: removedRows ? new TextEncoder().encode(text) : entry.bytes, filename: entry.name.replace(/\.csv$/iu, "") + (pendingOnly ? "_待處理.csv" : "_預檢通過.csv"), confirmation, removedRows };
+      }
+      var filteredExport = (e, q, r) => exportPartition(e, q, r);
+      var pendingExport = (e, q, r) => exportPartition(e, q, r, true);
+      module.exports = { HEADERS, LEGACY_LABELS, LABELS, RETRYABLE, validateBuyerAccount, parseBlacklist, splitCsv, parseSource, readSource, batchId, recordKey, recordState, itemState, buildQueue, runnableItems, countsFor, summary, summaryText, streakWarning, pruneFiles, toCsv, listCsv, filteredExport, pendingExport, exportPartition, displayLabel, blankRecord };
+    }
+  });
+
+  // ../../../shopee_未結鏢客人/新客限購_候選_v1.3_20261022/chat/src/buyer-types.cjs
+  var require_buyer_types = __commonJS({
+    "../../../shopee_未結鏢客人/新客限購_候選_v1.3_20261022/chat/src/buyer-types.cjs"(exports, module) {
+      "use strict";
+      var { splitCsv, validateBuyerAccount } = require_precheck_core();
+      var TYPES = Object.freeze({ OLD: "old", NEW: "new", PENDING: "pending", UNCLAIMED: "unclaimed" });
+      function fail(code, message) {
+        throw Object.assign(new Error(message), { code });
+      }
+      function id(value) {
+        if (typeof value === "number" && !Number.isSafeInteger(value)) fail("IDENTITY", "識別碼超出安全整數");
+        const s = String(value ?? "");
+        if (!/^[1-9][0-9]*$/u.test(s)) fail("IDENTITY", "缺少有效識別碼");
+        return s;
+      }
+      function unwrap(value) {
+        const s = String(value ?? "").trim(), m = s.match(/^="((?:[^"]|"")*)"$/u);
+        return m ? m[1].replaceAll('""', '"') : s;
+      }
+      function identities(csv, accounts = null) {
+        const records = splitCsv(csv), sessions = /* @__PURE__ */ new Set(), people = /* @__PURE__ */ new Map(), identitySeen = /* @__PURE__ */ new Map();
+        for (const r of records.slice(1)) {
+          if (!r.fields.some((x) => x.trim())) continue;
+          const a = validateBuyerAccount(r.fields[5]).text;
+          if (!a || r.fields[13]?.trim() === "inactiveCode") continue;
+          const session = unwrap(r.fields[1]);
+          if (!session) fail("SOURCE_SESSION", "來源缺少 Session");
+          sessions.add(session);
+          const uid = unwrap(r.fields[4]);
+          if (uid) id(uid);
+          const known = identitySeen.get(a);
+          if (known && uid && known !== uid) fail("SOURCE_IDENTITY", "同帳號對到兩個 UID：" + a);
+          if (uid) identitySeen.set(a, uid);
+          if (accounts && !accounts.has(a)) continue;
+          const previous = people.get(a);
+          people.set(a, { account: a, uid: uid || previous?.uid || "", lastRow: r.row });
+        }
+        if (sessions.size !== 1) fail("SOURCE_SESSION", "來源必須只有一個 Session");
+        const grouped = /* @__PURE__ */ new Map();
+        for (const p of [...people.values()].sort((a, b) => a.lastRow - b.lastRow)) {
+          const key = p.uid ? "uid:" + p.uid : "account:" + p.account, prior = grouped.get(key);
+          grouped.set(key, { account: p.account, uid: p.uid, aliases: [...new Set([...prior?.aliases || [], prior?.account].filter((a) => a && a !== p.account))] });
+        }
+        return { sourceSession: [...sessions][0], people: [...grouped.values()].sort((a, b) => a.account.localeCompare(b.account)) };
+      }
+      function cardSummary(raw) {
+        if (Boolean(raw?.order_card) === Boolean(raw?.package_level_order_card)) fail("CARD_SCHEMA", "訂單卡片格式不明");
+        const c = raw.order_card || raw.package_level_order_card;
+        const object = (v) => v && typeof v === "object" && !Array.isArray(v);
+        if (!object(c) || !object(c.order_ext_info) || !object(c.card_header) || c.card_header.buyer_info != null && !object(c.card_header.buyer_info)) fail("CARD_SCHEMA", "訂單卡片欄位格式不正確");
+        const orderId = id(c.order_ext_info.order_id), rawUid = c.order_ext_info.buyer_user_id, rawAccount = c.card_header.buyer_info?.username;
+        const missing = (v) => v === void 0 || v === null || v === "";
+        if (!missing(rawAccount) && (typeof rawAccount !== "string" || !rawAccount.trim())) fail("CARD_SCHEMA", "卡片買家帳號格式不正確");
+        const unattributed = missing(rawUid) && missing(rawAccount), uid = unattributed ? null : id(rawUid);
+        const statuses = raw.order_card ? [c.status_info?.status] : c.package_list?.map((p) => p.status_info?.status);
+        if (!Array.isArray(statuses) || !statuses.length || statuses.some((s) => typeof s !== "string" || !s.trim())) fail("CARD_SCHEMA", "訂單狀態缺漏");
+        return { uid, orderId, orderSn: String(c.card_header?.order_sn || ""), account: rawAccount || "", statuses, ...unattributed ? { unattributed: true } : {} };
+      }
+      function classify(cards, reasons = {}) {
+        const delivered = (s) => ["已送達", "已完成(鑑賞期內)", "已完成"].includes(s.replaceAll("（", "(").replaceAll("）", ")"));
+        const old = cards.find((c) => c.statuses.some(delivered));
+        if (old) return { rawType: TYPES.OLD, evidence: { orderSn: old.orderSn, statuses: old.statuses } };
+        const unclaimed = cards.find((c) => c.statuses.includes("不成立") && Number(reasons[c.orderId]) === 202);
+        if (unclaimed) return { rawType: TYPES.UNCLAIMED, evidence: { orderSn: unclaimed.orderSn, cancelReason: 202 } };
+        const pending = cards.find((c) => c.statuses.some((s) => s !== "不成立"));
+        if (pending) return { rawType: TYPES.PENDING, evidence: { orderSn: pending.orderSn, statuses: pending.statuses } };
+        if (cards.some((c) => c.statuses.includes("不成立") && !Number.isSafeInteger(reasons[c.orderId]))) fail("CANCEL_REASON", "不成立原因缺漏");
+        return { rawType: TYPES.NEW, evidence: null };
+      }
+      async function digest(value) {
+        const bytes = typeof value === "string" ? new TextEncoder().encode(value) : value;
+        return [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))].map((n) => n.toString(16).padStart(2, "0")).join("");
+      }
+      module.exports = { TYPES, fail, id, identities, cardSummary, classify, digest };
+    }
+  });
+
+  // ../../../shopee_未結鏢客人/新客限購_候選_v1.3_20261022/chat/src/buyer-orders.cjs
+  var require_buyer_orders = __commonJS({
+    "../../../shopee_未結鏢客人/新客限購_候選_v1.3_20261022/chat/src/buyer-orders.cjs"(exports, module) {
+      "use strict";
+      var { fail, id, cardSummary, classify } = require_buyer_types();
+      var PATHS = { index: "/api/v3/order/search_order_list_index", cards: "/api/v3/order/get_order_list_card_list", detail: "/api/v3/order/get_one_order" };
+      var PACING = Object.freeze({ requestGapMs: 1e3, searchGapMs: 2e3, retryDelayMs: 3e3, minThrottleMs: 3e4 });
+      function createApi({ gmRequest, cookie = () => document.cookie, stop = () => false, now = () => Date.now(), sleep = (ms) => new Promise((r) => setTimeout(r, ms)), shopId, onShop = () => {
+      } }) {
+        let lastStart = -Infinity, lastSearchStart = -Infinity, expectedShop = shopId ? id(shopId) : null, deadline = Infinity;
+        async function request(kind, body, orderId) {
+          if (!Object.hasOwn(PATHS, kind)) fail("ENDPOINT", "只允許唯讀訂單查詢端點");
+          if (stop()) fail("STOP", "已停止第二段");
+          await sleep(Math.max(0, PACING.requestGapMs - (now() - lastStart), kind === "index" ? PACING.searchGapMs - (now() - lastSearchStart) : 0));
+          if (stop()) fail("STOP", "已停止第二段");
+          if (now() >= deadline) fail("LIMIT", "超過每位查詢時間上限");
+          lastStart = now();
+          if (kind === "index") lastSearchStart = lastStart;
+          const cds = cookie().split(";").map((s) => s.trim()).find((s) => s.startsWith("SPC_CDS="))?.slice(8);
+          if (!cds) fail("AUTH", "登入資料不完整，請重新登入後繼續查");
+          const url = new URL(PATHS[kind], "https://seller.shopee.tw");
+          url.searchParams.set("SPC_CDS", decodeURIComponent(cds));
+          url.searchParams.set("SPC_CDS_VER", "2");
+          if (orderId) url.searchParams.set("order_id", id(orderId));
+          return new Promise((resolve, reject) => {
+            let handle, timer, settled = false;
+            const done = (error2, data) => {
+              if (settled) return;
+              settled = true;
+              clearTimeout(timer);
+              clearInterval(poll);
+              error2 ? reject(error2) : resolve(data);
+            };
+            const error = (code, message) => Object.assign(new Error(message), { code });
+            const poll = setInterval(() => {
+              if (stop()) {
+                done(error("STOP", "已停止第二段"));
+                handle?.abort();
+              }
+            }, 50);
+            const budget = Math.min(15e3, deadline - now());
+            timer = setTimeout(() => {
+              done(error(budget < 15e3 ? "LIMIT" : "TIMEOUT", budget < 15e3 ? "超過每位查詢時間上限" : "訂單查詢逾時"));
+              handle?.abort();
+            }, budget);
+            try {
+              handle = gmRequest({ url: url.href, method: body ? "POST" : "GET", headers: { "Content-Type": "application/json" }, ...body ? { data: JSON.stringify(body) } : {}, onload: (r) => {
+                try {
+                  const final = new URL(r.finalUrl || url.href);
+                  if ([401, 403].includes(r.status) || final.origin !== url.origin || final.pathname !== url.pathname || /login|verify|captcha/iu.test(final.pathname)) throw error("AUTH", "登入失效，請重新登入後按繼續查");
+                  if (r.status === 429) {
+                    const retryAfter = /^retry-after\s*:\s*([^\r\n]+)/imu.exec(r.responseHeaders || "")?.[1]?.trim();
+                    let waitMs = PACING.minThrottleMs;
+                    if (retryAfter) {
+                      const seconds = Number(retryAfter), date = Date.parse(retryAfter);
+                      if (Number.isFinite(seconds) && seconds >= 0) waitMs = Math.max(waitMs, seconds * 1e3);
+                      else if (Number.isFinite(date)) waitMs = Math.max(waitMs, date - now());
+                    }
+                    throw Object.assign(error("THROTTLED", "蝦皮暫時限制查詢，已暫停；請冷卻後續查"), { retryAfterMs: waitMs });
+                  }
+                  if (r.status !== 200) throw error("HTTP", "訂單查詢 HTTP " + r.status);
+                  let v;
+                  try {
+                    v = JSON.parse(r.responseText);
+                  } catch {
+                    throw error("AUTH", "回應不是訂單資料，請確認登入或驗證頁");
+                  }
+                  if (v.code !== 0 || !v.data) throw error([401, 403].includes(v.code) ? "AUTH" : "API", "蝦皮訂單查詢未成功");
+                  done(null, v.data);
+                } catch (e) {
+                  done(e);
+                }
+              }, onerror: () => done(error("NETWORK", "訂單查詢失敗")), ontimeout: () => done(error("TIMEOUT", "訂單查詢逾時")), onabort: () => done(error("STOP", "查詢已中止")) });
+            } catch (e) {
+              done(e);
+            }
+          });
+        }
+        return { request, setDeadline: (value) => {
+          deadline = value;
+        }, checkShop(value) {
+          const s = id(value);
+          if (expectedShop && s !== expectedShop) fail("SHOP_CHANGED", "賣場身分改變，停止查詢");
+          expectedShop = s;
+          onShop(s);
+          return s;
+        }, getShop: () => expectedShop };
+      }
+      async function queryOnce(api, person, { stop = () => false, now = () => Date.now() } = {}) {
+        id(person.uid);
+        const started = now(), seen = /* @__PURE__ */ new Set(), cursors = /* @__PURE__ */ new Set(), matched = [], aliases = /* @__PURE__ */ new Set(), reasons = {};
+        api.setDeadline?.(started + 18e4);
+        let requests = 0, count = 0, unattributedCards = 0, sentinel = null, knownTotal = null;
+        async function call(kind, body, orderId) {
+          if (stop()) fail("STOP", "已停止第二段");
+          if (++requests > 250 || now() - started >= 18e4) fail("LIMIT", "超過每位查詢上限");
+          const v = await api.request(kind, body, orderId);
+          if (now() - started >= 18e4) fail("LIMIT", "超過每位查詢上限");
+          return v;
+        }
+        for (let page = 1; page <= 25; page++) {
+          const data = await call("index", { order_list_tab: 100, entity_type: 1, pagination: { from_page_number: page - 1, page_number: page, page_size: 40, ...sentinel ? { page_sentinel: sentinel } : {} }, filter: { fulfillment_type: 0, is_drop_off: 0, fulfillment_source: 0, action_filter: 0 }, sort: { sort_type: 3, ascending: false }, search_param: { keyword: person.account, category: 2 } });
+          if (!Array.isArray(data.index_list) || data.index_list.length > 40 || !data.pagination || !Number.isSafeInteger(data.pagination.total) || data.pagination.total < 0) fail("INDEX_SCHEMA", "索引格式不完整");
+          const total = data.pagination.total;
+          if (knownTotal !== null && total !== knownTotal) fail("CHANGED", "查詢中訂單總數改變");
+          knownTotal = total;
+          if (data.pagination.page_number != null && data.pagination.page_number !== page) {
+            if (seen.size >= total) break;
+            fail("CURSOR", "回應頁碼不符且訂單尚未讀完");
+          }
+          count += data.index_list.length;
+          if (count > 1e3) fail("LIMIT", "超過索引上限");
+          const fresh = [];
+          for (const index of data.index_list) {
+            api.checkShop(index.shop_id);
+            const key = id(index.order_id);
+            if (typeof index.region_id !== "string" || !index.region_id) fail("INDEX_SCHEMA", "索引地區缺漏");
+            if (!seen.has(key)) {
+              seen.add(key);
+              fresh.push(index);
+            }
+          }
+          if (data.index_list.length && !fresh.length) {
+            if (seen.size >= total) break;
+            fail("CURSOR", "翻頁沒有前進且訂單尚未讀完");
+          }
+          for (let i = 0; i < fresh.length; i += 5) {
+            const batch = fresh.slice(i, i + 5), v = await call("cards", { order_list_tab: 100, need_count_down_desc: false, order_param_list: batch.map((x) => ({ order_id: x.order_id, shop_id: x.shop_id, region_id: x.region_id })) }), list = v.card_list;
+            if (!Array.isArray(list) || list.length !== batch.length) fail("CARD_MISSING", "訂單卡片缺漏");
+            const wanted = new Set(batch.map((x) => id(x.order_id))), received = /* @__PURE__ */ new Set();
+            for (const raw of list) {
+              const c = cardSummary(raw);
+              if (!wanted.has(c.orderId) || received.has(c.orderId)) fail("CARD_ID", "卡片訂單編號不符或重複");
+              received.add(c.orderId);
+              if (c.unattributed) {
+                unattributedCards++;
+                continue;
+              }
+              if (c.uid !== person.uid) continue;
+              matched.push(c);
+              if (c.account) aliases.add(c.account);
+            }
+            if (matched.some((c) => c.statuses.some((s) => ["已送達", "已完成(鑑賞期內)", "已完成", "已完成（鑑賞期內）"].includes(s)))) return { ...classify(matched, {}), aliases: [...aliases], complete: true, requests, unattributedCards };
+          }
+          if (seen.size >= total) break;
+          const next = data.pagination.next_page_sentinel;
+          if (!next) fail("INCOMPLETE", "訂單尚未讀完卻沒有下一頁");
+          if (!data.index_list.length || typeof next !== "string" || next === sentinel || cursors.has(next)) fail("CURSOR", "分頁游標無效");
+          cursors.add(next);
+          sentinel = next;
+          if (page === 25) fail("LIMIT", "超過頁數上限");
+        }
+        for (const c of matched.filter((c2) => c2.statuses.includes("不成立"))) {
+          const d = await call("detail", null, c.orderId);
+          if (id(d.order_id) !== c.orderId || api.checkShop(d.shop_id) !== api.getShop()) fail("DETAIL_ID", "訂單明細歸屬不符");
+          const uid = d.buyer_user?.user_id ?? d.buyer_user?.userid;
+          if (id(uid) !== person.uid) fail("DETAIL_UID", "明細買家不符");
+          if (!Number.isSafeInteger(d.cancel_reason_ext)) fail("CANCEL_REASON", "不成立原因缺漏");
+          reasons[c.orderId] = d.cancel_reason_ext;
+        }
+        return { ...classify(matched, reasons), aliases: [...aliases], complete: true, requests, unattributedCards };
+      }
+      async function queryBuyer(api, person, options = {}) {
+        let last;
+        const sleep = options.sleep || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+        for (let attempt = 0; attempt < 2; attempt++) {
+          try {
+            const result = await queryOnce(api, person, options);
+            return { ...person, ...result, aliases: [.../* @__PURE__ */ new Set([...person.aliases || [], ...result.aliases])], queryFailed: false, checkedAt: (/* @__PURE__ */ new Date()).toISOString() };
+          } catch (e) {
+            if (["AUTH", "STOP", "SHOP_CHANGED", "THROTTLED"].includes(e.code)) throw e;
+            last = e;
+            if (attempt === 0) {
+              await sleep(PACING.retryDelayMs);
+              if (options.stop?.()) fail("STOP", "第二段已停止，不再重試");
+            }
+          }
+        }
+        return { ...person, rawType: "new", queryFailed: true, failureReason: last.code || "QUERY_FAILED", complete: false, aliases: person.aliases || [], checkedAt: (/* @__PURE__ */ new Date()).toISOString() };
+      }
+      module.exports = { PATHS, PACING, createApi, queryOnce, queryBuyer };
+    }
+  });
+
+  // ../../../shopee_未結鏢客人/新客限購_候選_v1.3_20261022/chat/src/buyer-query-guard.cjs
+  var require_buyer_query_guard = __commonJS({
+    "../../../shopee_未結鏢客人/新客限購_候選_v1.3_20261022/chat/src/buyer-query-guard.cjs"(exports, module) {
+      "use strict";
+      var SHARED_COOLDOWN_KEY = "shopee-buyer-orders:shared-cooldown:v1";
+      var GM_COOLDOWN_KEY = "buyer-orders:cooldown:v1";
+      var BATCH_FAILURES = Object.freeze(["API", "HTTP", "NETWORK", "TIMEOUT"]);
+      function fail(code, message) {
+        throw Object.assign(new Error(message), { code });
+      }
+      function validCooldown(value) {
+        if (value == null) return null;
+        if (!value || typeof value !== "object" || !Number.isSafeInteger(value.untilMs) || value.untilMs < 0 || !["THROTTLED", "BATCH_UNAVAILABLE"].includes(value.failureReason)) fail("COOLDOWN_INVALID", "共用查詢冷卻資料不正確，第二段已停止，請聯絡維護人員");
+        return value;
+      }
+      function createCooldownStore({ gm, sharedStorage }) {
+        if (!sharedStorage) fail("COOLDOWN_STORAGE", "無法使用同網域共用冷卻儲存，第二段不發請求");
+        function readShared() {
+          try {
+            const text = sharedStorage.getItem(SHARED_COOLDOWN_KEY);
+            return validCooldown(text ? JSON.parse(text) : null);
+          } catch (e) {
+            if (e.code) throw e;
+            fail("COOLDOWN_STORAGE", "無法讀取共用冷卻紀錄，第二段不發請求");
+          }
+        }
+        async function read() {
+          const local = validCooldown(await gm.get(GM_COOLDOWN_KEY, null)), shared = readShared();
+          return !local ? shared : !shared ? local : local.untilMs >= shared.untilMs ? local : shared;
+        }
+        async function write(value) {
+          validCooldown(value);
+          const previous = await read(), next = previous && previous.untilMs > value.untilMs ? previous : value;
+          try {
+            sharedStorage.setItem(SHARED_COOLDOWN_KEY, JSON.stringify(next));
+          } catch {
+            fail("COOLDOWN_STORAGE", "無法保存共用冷卻紀錄，第二段已停止");
+          }
+          await gm.set(GM_COOLDOWN_KEY, next);
+          return next;
+        }
+        return { read, write };
+      }
+      function recordBuyerOutcome(cache, buyer, found) {
+        found.set(buyer.account, buyer);
+        const prior = Array.isArray(cache.recentServiceFailures) ? cache.recentServiceFailures : [];
+        cache.recentServiceFailures = buyer.queryFailed && BATCH_FAILURES.includes(buyer.failureReason) ? [...prior.filter((a) => a !== buyer.account), buyer.account] : [];
+        if (cache.recentServiceFailures.length >= 3) {
+          const retryAccounts = [...cache.recentServiceFailures];
+          for (const account of retryAccounts) found.delete(account);
+          cache.buyers = [...found.values()];
+          cache.recentServiceFailures = [];
+          cache.pendingServiceRetries = retryAccounts;
+          cache.pauseFailureReason = "BATCH_UNAVAILABLE";
+          throw Object.assign(new Error("連續 3 位訂單查詢失敗，已暫停整批；稍後按繼續查時會重查這 3 位。"), { code: "BATCH_UNAVAILABLE" });
+        }
+        cache.buyers = [...found.values()];
+        if (!buyer.queryFailed && cache.pendingServiceRetries) cache.pendingServiceRetries = cache.pendingServiceRetries.filter((a) => a !== buyer.account);
+      }
+      module.exports = { SHARED_COOLDOWN_KEY, GM_COOLDOWN_KEY, BATCH_FAILURES, validCooldown, createCooldownStore, recordBuyerOutcome };
+    }
+  });
+
+  // ../../../shopee_未結鏢客人/新客限購_候選_v1.3_20261022/chat/src/buyer-phase.cjs
+  var require_buyer_phase = __commonJS({
+    "../../../shopee_未結鏢客人/新客限購_候選_v1.3_20261022/chat/src/buyer-phase.cjs"(exports, module) {
+      "use strict";
+      var { identities, digest, fail } = require_buyer_types();
+      var { createApi, queryBuyer, PACING } = require_buyer_orders();
+      var { createCooldownStore, recordBuyerOutcome } = require_buyer_query_guard();
+      var POLICY = 1;
+      var QUERY_VERSION = 3;
+      var LOCK = "shopee-buyer-orders-v1";
+      function pageShopId() {
+        if (typeof document === "undefined") return null;
+        for (const script of document.scripts) {
+          const text = script.textContent.trim(), prefix = "window.__MMF_PREFETCHED_APIS__=";
+          if (!text.startsWith(prefix)) continue;
+          try {
+            const data = JSON.parse(text.slice(prefix.length).replace(/;\s*$/u, "")), value = data["/api/v2/login/"]?.data?.shopid;
+            if (/^[1-9][0-9]*$/u.test(String(value))) return String(value);
+          } catch {
+          }
+        }
+        return null;
+      }
+      async function precheckSnapshot(state, repo) {
+        const core2 = require_precheck_core();
+        if (!state.entry || state.running || state.busy || state.stop) fail("PHASE1", "第一段尚未成功完成");
+        const saved = await repo.assertBatch(state.queue, state.entry.hash), summary = core2.summary(state.queue, saved.records);
+        if (summary.unchecked) fail("PHASE1", "第一段仍有待查買家");
+        const accepted = new Set(state.queue.items.filter((p) => ["found", "manualSent", "sent"].includes(core2.itemState(state.queue, saved.records, p))).map((p) => p.account));
+        const source = identities(state.entry.text, accepted), records = state.queue.items.map((p) => [p.account, core2.itemState(state.queue, saved.records, p), saved.records[core2.recordKey(state.queue.batchId, p.account)] || null]);
+        return { ...source, shopId: pageShopId(), sourceHash: state.entry.hash, batchId: state.queue.batchId, sourceTool: "precheck", sourceVersion: "0.4.3", snapshotFingerprint: await digest(JSON.stringify([state.entry.hash, state.queue.batchId, records, source])) };
+      }
+      async function replaySnapshot(state, core2) {
+        if (state.running || state.stop || !state.result?.canExport) fail("PHASE1", "回放尚無正式可匯出結果");
+        const csv = core2.ordersCsv(state.result), source = identities(csv);
+        return { ...source, shopId: pageShopId(), sourceHash: await digest(csv), batchId: state.config.sessionId, sourceTool: "replay", sourceVersion: "0.2.3", snapshotFingerprint: await digest(JSON.stringify([source, csv])) };
+      }
+      function mountPhase({ ui: ui2, getSnapshot, gm, automatic }) {
+        const box = document.createElement("section");
+        box.innerHTML = "<hr><strong>第二段：買家訂單分類</strong><p data-buyer-status>第一段完成後查詢；不操作聊聊。</p><button data-buyer-start>查詢／繼續查</button> <button data-buyer-requery>重新查第二段</button> <button data-buyer-stop>停止第二段</button> <button data-buyer-fallback>確實無法查詢，依規則採新客人</button> <button data-buyer-export>匯出買家類型名單</button>";
+        ui2.$("[data-log]").before(box);
+        const $ = (s) => box.querySelector(s), status = $("[data-buyer-status]");
+        let running = false, stopped = false, result = null, binding = null, cache = null, cooldownStore = null;
+        const show = (message, error = false) => {
+          status.textContent = message;
+          status.style.color = error ? "#f66" : "";
+        };
+        const changed = (event) => {
+          if (!event.target.matches?.("[data-files],[data-save-blacklist],[data-mark-manual],[data-mark-blocked],[data-recheck],[data-new-round],[data-start],[data-title],[data-cutoff],[data-catalog-file]")) return;
+          stopped = true;
+          result = null;
+          show("第一段來源或結果有更新，第二段舊結果已失效；正式完成後重新查詢。");
+        };
+        for (const name of ["click", "change", "input"]) ui2.root.addEventListener(name, changed);
+        async function current() {
+          const s = await getSnapshot();
+          if (binding && s.snapshotFingerprint !== binding.snapshotFingerprint) {
+            result = null;
+            cache = null;
+            binding = null;
+            fail("SNAPSHOT_CHANGED", "第一段結果已變更，請重查第二段");
+          }
+          return s;
+        }
+        async function save() {
+          await gm.set("buyer-types:cache:v1", cache);
+        }
+        async function persistPause(error) {
+          if (error.code === "AUTH" && cache) {
+            cache.authFailure = "AUTH";
+            cache.pauseFailureReason = "AUTH";
+            await save();
+          }
+          if (["THROTTLED", "BATCH_UNAVAILABLE"].includes(error.code) && cache) {
+            cache.pauseFailureReason = error.code;
+            cache.retryNotBefore = Date.now() + Math.max(PACING.minThrottleMs, error.retryAfterMs || 0);
+            await cooldownStore.write({ untilMs: cache.retryNotBefore, failureReason: error.code });
+            await save();
+          }
+        }
+        async function bootstrap(api) {
+          if (api.getShop()) return;
+          const d = await api.request("index", { order_list_tab: 100, entity_type: 1, pagination: { from_page_number: 0, page_number: 1, page_size: 40 }, filter: { fulfillment_type: 0, is_drop_off: 0, fulfillment_source: 0, action_filter: 0 }, sort: { sort_type: 3, ascending: false } });
+          if (!Array.isArray(d.index_list) || !d.index_list.length) fail("SHOP_UNKNOWN", "無法確認賣場身分，未產生名單");
+          for (const i of d.index_list) api.checkShop(i.shop_id);
+        }
+        async function work(fallback = false) {
+          if (running) return;
+          running = true;
+          stopped = false;
+          result = null;
+          binding = null;
+          try {
+            if (!navigator.locks?.request) fail("LOCK_UNAVAILABLE", "瀏覽器不支援查詢鎖，停止第二段");
+            await navigator.locks.request(LOCK, { ifAvailable: true }, async (lock) => {
+              if (!lock) fail("QUERY_BUSY", "另一支帳號預檢／回放正在查訂單，請等完成");
+              try {
+                cooldownStore ||= createCooldownStore({ gm, sharedStorage: localStorage });
+                const snap = await current();
+                binding = snap;
+                const previous = await gm.get("buyer-types:cache:v1", null);
+                cache = previous?.snapshotFingerprint === snap.snapshotFingerprint && previous.policyVersion === POLICY && previous.queryVersion === QUERY_VERSION ? previous : { ...snap, policyVersion: POLICY, queryVersion: QUERY_VERSION, shopId: snap.shopId || null, buyers: [], jobId: crypto.randomUUID(), startedAt: (/* @__PURE__ */ new Date()).toISOString() };
+                if (snap.shopId && cache.shopId && snap.shopId !== cache.shopId) fail("SHOP_CHANGED", "賣場身分改變，請重新做第一段");
+                const cooldown = await cooldownStore.read(), notBefore = Math.max(cache.retryNotBefore || 0, cooldown?.untilMs || 0);
+                if (cooldown?.untilMs > Date.now() && cooldown.failureReason) cache.pauseFailureReason = cooldown.failureReason;
+                if (!fallback && notBefore > Date.now()) fail("COOLDOWN", `蝦皮查詢冷卻中，請 ${Math.ceil((notBefore - Date.now()) / 1e3)} 秒後按繼續查；不會發出新請求。`);
+                if (!fallback && snap.people.some((p) => !cache.buyers.some((b) => b.account === p.account))) {
+                  show("慢速查詢：每次請求至少 1 秒，帳號搜尋至少 2 秒。");
+                  await new Promise((resolve) => setTimeout(resolve, PACING.searchGapMs));
+                }
+                const api = createApi({ gmRequest: typeof GM_xmlhttpRequest === "function" ? GM_xmlhttpRequest : () => fail("GM_UNAVAILABLE", "需要篡改猴 GM_xmlhttpRequest"), stop: () => stopped, shopId: cache.shopId, onShop: (s) => {
+                  cache.shopId = s;
+                } });
+                if (fallback) {
+                  if (!cache.shopId) fail("SHOP_UNKNOWN", "尚未確認賣場身分，請先重新登入；不會捏造賣場名單。");
+                } else await bootstrap(api);
+                const found = new Map(cache.buyers.map((b) => [b.account, b]));
+                for (const person of snap.people) {
+                  if (stopped) fail("STOP", "第二段已停止，可接續");
+                  await current();
+                  if (found.has(person.account)) continue;
+                  show("背景查訂單 " + (found.size + 1) + "／" + snap.people.length + "：" + person.account);
+                  let buyer;
+                  if (fallback) buyer = { ...person, rawType: "new", queryFailed: true, failureReason: cache.pauseFailureReason || cache.authFailure || "QUERY_UNAVAILABLE", complete: false, aliases: [], checkedAt: (/* @__PURE__ */ new Date()).toISOString() };
+                  else buyer = await queryBuyer(api, person, { stop: () => stopped });
+                  if (stopped) fail("STOP", "第二段已停止，晚到回應不保存");
+                  await current();
+                  recordBuyerOutcome(cache, buyer, found);
+                  await save();
+                }
+                if (stopped) fail("STOP", "第二段已停止");
+                await current();
+                result = { schemaVersion: 1, policyVersion: POLICY, queryVersion: QUERY_VERSION, queryPacing: PACING, shopId: cache.shopId, sourceSession: snap.sourceSession, sourceTool: snap.sourceTool, sourceVersion: snap.sourceVersion, sourceHash: snap.sourceHash, batchId: snap.batchId, snapshotFingerprint: snap.snapshotFingerprint, jobId: cache.jobId, startedAt: cache.startedAt, completedAt: (/* @__PURE__ */ new Date()).toISOString(), buyers: cache.buyers };
+                const n = (t) => result.buyers.filter((b) => b.rawType === t).length;
+                show(`老客人 ${n("old")}、新客人 ${n("new")}（其中查詢失敗 ${result.buyers.filter((b) => b.queryFailed).length}）、上一筆還沒取貨 ${n("pending")}、曾逾期未取件 ${n("unclaimed")}
+已略過 UID 與帳號皆空的卡片 ${result.buyers.reduce((n2, b) => n2 + (b.unattributedCards || 0), 0)} 張（依每位查詢觀察次數加總）
+曾逾期未取件：${result.buyers.filter((b) => b.rawType === "unclaimed").map((b) => b.account).join("、") || "無"}`);
+              } catch (error) {
+                await persistPause(error);
+                throw error;
+              }
+            });
+          } catch (e) {
+            show(e.code === "AUTH" ? "登入失效：請重新登入後按「查詢／繼續查」。確實無法完成時才採新客人。" : e.message, true);
+          } finally {
+            running = false;
+          }
+        }
+        $("[data-buyer-start]").addEventListener("click", () => work());
+        $("[data-buyer-stop]").addEventListener("click", () => {
+          stopped = true;
+        });
+        $("[data-buyer-requery]").addEventListener("click", async () => {
+          if (running) return;
+          try {
+            await current();
+            cooldownStore ||= createCooldownStore({ gm, sharedStorage: localStorage });
+            const saved = await gm.get("buyer-types:cache:v1", null), cooldown = await cooldownStore.read();
+            if (Math.max(saved?.retryNotBefore || 0, cooldown?.untilMs || 0) > Date.now()) fail("COOLDOWN", "蝦皮查詢仍在冷卻中，不能用重新查詢略過等待。");
+            if (!confirm("只重查第二段訂單分類，第一段結果保留。確定重新查？")) return;
+            result = null;
+            cache = null;
+            binding = null;
+            await gm.set("buyer-types:cache:v1", null);
+            await work();
+          } catch (e) {
+            show(e.message, true);
+          }
+        });
+        $("[data-buyer-fallback]").addEventListener("click", () => {
+          if (confirm("確定已嘗試恢復查詢仍無法完成？未查完者將列查詢失敗，採新客人8件；本期原有更嚴限制仍保留。")) work(true);
+        });
+        $("[data-buyer-export]").addEventListener("click", async () => {
+          try {
+            if (running || !result) fail("NOT_READY", "第二段尚未完成");
+            await current();
+            ui2.download(JSON.stringify(result, null, 2), `買家類型_${result.sourceSession}_${result.jobId}.json`);
+          } catch (e) {
+            result = null;
+            show(e.message, true);
+          }
+        });
+        return { run: () => work(), handoffError(error) {
+          stopped = true;
+          result = null;
+          show("第二段交接失敗（" + (error?.code || error?.name || "ERROR") + "）：" + (error?.message || String(error)) + "。第一段結果保留，請保留原檔並提供此錯誤協助排查。", true);
+        }, get result() {
+          return result;
+        } };
+      }
+      module.exports = { POLICY, QUERY_VERSION, LOCK, precheckSnapshot, replaySnapshot, mountPhase };
+    }
+  });
+
+  // ../../../shopee_未結鏢客人/新客限購_候選_v1.3_20261022/chat/vendor/live-capture/parser.js
   var parser_exports = {};
   __export(parser_exports, {
     BUILTIN_SPEC_KEYWORDS: () => BUILTIN_SPEC_KEYWORDS,
@@ -1320,7 +2053,7 @@ ${config.codes.length} 個商品（${config.codes[0]}～${config.codes.at(-1)}�
     tokenizeSpecText: () => tokenizeSpecText
   });
 
-  // vendor/live-capture/constants.js
+  // ../../../shopee_未結鏢客人/新客限購_候選_v1.3_20261022/chat/vendor/live-capture/constants.js
   var APP_PREFIX = "slocc:v1";
   var SESSION_KEY_PREFIX = `${APP_PREFIX}:session:`;
   var TAB_ID_KEY = `${APP_PREFIX}:tab-id`;
@@ -1347,7 +2080,7 @@ ${config.codes.length} 個商品（${config.codes[0]}～${config.codes.at(-1)}�
     OBSERVER: "observer"
   });
 
-  // vendor/live-capture/parser.js
+  // ../../../shopee_未結鏢客人/新客限購_候選_v1.3_20261022/chat/vendor/live-capture/parser.js
   var PRODUCT_CODE_PATTERN = /^[A-Z][0-9]{2,3}$/u;
   var LEADING_PRODUCT_CODE_PATTERN = /^([A-Z](?:[0-9]{3}|[0-9]{2}))(?![0-9])/u;
   var CONFIRMED_ORDER_PATTERN = /^(?<productCode>[A-Z][0-9]{2,3})(?:\s+(?<variantOrSize>[A-Z0-9_-]{1,10}))?\s*\+\s*(?<quantity>[0-9]+)$/u;
@@ -1967,7 +2700,7 @@ ${config.codes.length} 個商品（${config.codes[0]}～${config.codes.at(-1)}�
     return compatibleResult(normalizedMessage, RAW_CLASSIFICATIONS.CHAT);
   }
 
-  // vendor/live-capture/catalog-import.js
+  // ../../../shopee_未結鏢客人/新客限購_候選_v1.3_20261022/chat/vendor/live-capture/catalog-import.js
   var catalog_import_exports = {};
   __export(catalog_import_exports, {
     CATALOG_HEADERS: () => CATALOG_HEADERS,
@@ -2436,7 +3169,7 @@ ${config.codes.length} 個商品（${config.codes[0]}～${config.codes.at(-1)}�
     };
   }
 
-  // vendor/live-capture/csv.js
+  // ../../../shopee_未結鏢客人/新客限購_候選_v1.3_20261022/chat/vendor/live-capture/csv.js
   var csv_exports = {};
   __export(csv_exports, {
     CSV_COLUMN_INDEX: () => CSV_COLUMN_INDEX,
@@ -2453,7 +3186,7 @@ ${config.codes.length} 個商品（${config.codes[0]}～${config.codes.at(-1)}�
     serializeCsvRow: () => serializeCsvRow
   });
 
-  // vendor/live-capture/shout-history.js
+  // ../../../shopee_未結鏢客人/新客限購_候選_v1.3_20261022/chat/vendor/live-capture/shout-history.js
   var SHOUT_HISTORY_LIMIT = 3e4;
   var EMPTY_HISTORY_LENGTH = '{"v":1,"e":[]}'.length;
   var DECIMAL_ID = /^[0-9]+$/u;
@@ -2569,7 +3302,7 @@ ${config.codes.length} 個商品（${config.codes[0]}～${config.codes.at(-1)}�
     return JSON.stringify({ v: 1, p: historyPosition(item) });
   }
 
-  // vendor/live-capture/aggregation.js
+  // ../../../shopee_未結鏢客人/新客限購_候選_v1.3_20261022/chat/vendor/live-capture/aggregation.js
   function buyerKey(item) {
     const uid = String(item?.uid ?? "").trim();
     return uid ? `uid:${uid}` : `username:${String(item?.username ?? "")}`;
@@ -2665,7 +3398,7 @@ ${config.codes.length} 個商品（${config.codes[0]}～${config.codes.at(-1)}�
     };
   }
 
-  // vendor/live-capture/csv.js
+  // ../../../shopee_未結鏢客人/新客限購_候選_v1.3_20261022/chat/vendor/live-capture/csv.js
   var ORDER_HEADERS = [
     "擷取時間",
     "直播Session",
@@ -2920,17 +3653,35 @@ ${rows.map((row) => serializeCsvRow(rowFromInactiveComment(row))).join("\r\n")}`
     return `shopee-live-${safeSession}-${date}.csv`;
   }
 
-  // src/entry-replay.mjs
+  // ../../../shopee_未結鏢客人/新客限購_候選_v1.3_20261022/chat/src/entry-replay.mjs
   var import_replay_core = __toESM(require_replay_core(), 1);
   var import_chat_runtime = __toESM(require_chat_runtime(), 1);
   var import_jambo_catalog = __toESM(require_jambo_catalog(), 1);
   var import_replay_ui = __toESM(require_replay_ui(), 1);
+  var import_buyer_phase = __toESM(require_buyer_phase(), 1);
   var ExcelJS = typeof __REPLAY_EXCELJS__ !== "undefined" ? __REPLAY_EXCELJS__ : null;
   var core = import_replay_core.default.createReplayCore({ parser: parser_exports, catalog: catalog_import_exports, csv: csv_exports });
   var jambo = { read: (bytes, fileName) => import_jambo_catalog.default.readJamboCatalog({ ExcelJS, catalog: catalog_import_exports, parser: parser_exports }, bytes, fileName) };
-  var API = { ...core, chat: import_chat_runtime.default, VERSION: import_replay_ui.default.VERSION, init: () => import_replay_ui.default.initReplay(core, jambo), parser: parser_exports, catalog: catalog_import_exports, csv: csv_exports, jamboCatalog: import_jambo_catalog.default, readJamboCatalog: jambo.read };
+  async function init() {
+    let controller;
+    const ready = await import_replay_ui.default.initReplay(core, jambo, async () => {
+      setTimeout(async () => {
+        try {
+          await import_buyer_phase.default.replaySnapshot(ready.state, core);
+          await controller?.run();
+        } catch (e) {
+          if (controller) controller.handoffError(e);
+          else ready.ui.show("第二段交接失敗：" + (e?.message || String(e)), true);
+        }
+      }, 0);
+    });
+    if (!ready) return;
+    controller = import_buyer_phase.default.mountPhase({ ui: ready.ui, gm: { get: (k, d) => GM_getValue(k, d), set: (k, v) => GM_setValue(k, v) }, getSnapshot: () => import_buyer_phase.default.replaySnapshot(ready.state, core) });
+    return { ...ready, buyerPhase: controller };
+  }
+  var API = { ...core, chat: import_chat_runtime.default, VERSION: import_replay_ui.default.VERSION, init, buyerPhase: import_buyer_phase.default, parser: parser_exports, catalog: catalog_import_exports, csv: csv_exports, jamboCatalog: import_jambo_catalog.default, readJamboCatalog: jambo.read };
   if (typeof window === "undefined") globalThis.__SHOPEE_CANDIDATE_NODE__ = API;
-  else import_replay_ui.default.initReplay(core, jambo).catch(() => {
+  else init().catch(() => {
   });
 })();
 if(typeof window==='undefined'&&typeof module==='object'&&module.exports){module.exports=globalThis.__SHOPEE_CANDIDATE_NODE__;delete globalThis.__SHOPEE_CANDIDATE_NODE__;}

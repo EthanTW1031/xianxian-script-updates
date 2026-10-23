@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee 自動回覆明細
 // @namespace    local.shopee.auto-reply-detail
-// @version      1.5.0
+// @version      1.6.1
 // @description  聊聊頁手動匯入已審核 Excel，預覽後安全逐筆發送
 // @match        https://seller.shopee.tw/new-webchat/conversations*
 // @require      https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js
@@ -18,7 +18,7 @@
 
   // 必須與檔案開頭的 @version 完全相同：面板顯示的是這個常數，不是 @version。
   // v1.1.7 曾漏改這裡，導致面板顯示 1.1.5、現場無法判斷實際安裝版本。
-  const VERSION = "1.5.0";
+  const VERSION = "1.6.1";
   const SHIPPING_NOTICE = "僅限使用蝦皮店到店/711/全家/新竹物流方式結單";
   const STORE = Object.freeze({
     sent: "winlist-shopee:sent:v3",
@@ -2240,6 +2240,7 @@
             : `總金額為：$${formatMoney(total)}`,
           closing,
           chargeShopeeFee && !closing.includes(SHIPPING_NOTICE) ? SHIPPING_NOTICE : "",
+          config.newBuyerAccounts?.includes(account) ? (config.newBuyerReminder || "") : "",
         ]
           .filter(Boolean)
           .join("\n");
@@ -2322,10 +2323,18 @@
       ...DEFAULT_CONFIG,
       ...fallbackConfig,
     }, comboPromotions !== null);
+    const reminderSheet=workbook.getWorksheet("本期新客人提醒");
+    if(reminderSheet){
+      if(reminderSheet.getCell("A1").text!=="買家UID"||reminderSheet.getCell("B1").text!=="買家帳號")throw new Error("本期新客人提醒表頭不正確");
+      settings.newBuyerAccounts=[];settings.newBuyerReminder=settingsSheet.getCell("H9").text;
+      const seen=new Map();for(let r=2;r<=reminderSheet.rowCount;r++){const uid=reminderSheet.getCell(r,1).text,account=reminderSheet.getCell(r,2).text;if(!account&&!uid)continue;if(!account||seen.has(account)&&seen.get(account)!==uid)throw new Error("本期新客人提醒身份矛盾");seen.set(account,uid);settings.newBuyerAccounts.push(account);}
+    }
     const rows = readReviewedRows(confirmed, comboPromotions !== null ? markerRows : null);
     if (comboPromotions !== null) validateComboPromotions(comboPromotions, readReviewedPrices(settingsSheet), readMultiPriceCodes(settingsSheet), rows);
     const roster = readBuyerRoster(settingsSheet, settings.session);
+    if(reminderSheet&&roster.accounts){for(let r=2;r<=reminderSheet.rowCount;r++){const uid=reminderSheet.getCell(r,1).text,a=reminderSheet.getCell(r,2).text;if(a&&uid&&roster.accounts.get(a)!==uid)throw new Error("本期新客人提醒與買家名冊UID不符");}}
     const identityWarnings = roster.warning ? [roster.warning] : [];
+    if(reminderSheet&&!roster.accounts)identityWarnings.push("買家名冊無法驗證；本期新客人提醒改以完整買家帳號精確比對，未驗證 UID，請核對發送預覽。");
     const outside = [];
     for (const row of rows) {
       row.buyerUid = roster.accounts?.get(row.account) || "";
@@ -2877,6 +2886,7 @@
   }
 
   async function sendOneItem(item, stopRequested, reportStage = () => {}) {
+    if(item.message.length>2400)throw new Error("明細超過蝦皮單則限制，請改用手動分則貼上；本次未輸入或送出。");
     const searchInput = await waitFor(
       () => firstVisible(CHAT_SELECTORS.searchInputs),
       10000,
@@ -3902,3 +3912,5 @@
     }
   }
 })();
+
+

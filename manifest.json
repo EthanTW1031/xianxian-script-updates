@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "publishedAt": "2026-10-21T07:35:57.345Z",
+  "publishedAt": "2026-10-23T03:35:04.519Z",
   "scripts": [
     {
       "id": "fb-inbox-finder",
@@ -46,21 +46,21 @@
       "id": "shopee-account-precheck",
       "name": "Shopee 帳號預檢",
       "namespace": "local.shopee.account-precheck",
-      "version": "0.3.6",
+      "version": "0.4.3",
       "file": "scripts/shopee-account-precheck.user.js",
-      "sha256": "0fa7fe5fb8d132242eefc6a067b0e725771a8061dd34f17daacb20780eb80844",
-      "bytes": 88993,
-      "updatedAt": "2026-10-17T05:56:44.443Z"
+      "sha256": "54071abb8c08efaea74b655975f48169d0271e042719e67949f52fbba14f0cb4",
+      "bytes": 126188,
+      "updatedAt": "2026-10-23T03:35:04.519Z"
     },
     {
       "id": "shopee-auto-detail-reply",
       "name": "Shopee 自動回覆明細",
       "namespace": "local.shopee.auto-reply-detail",
-      "version": "1.5.0",
+      "version": "1.6.1",
       "file": "scripts/shopee-auto-detail-reply.user.js",
-      "sha256": "cbeec4328f3350f212330678b32f69eba67ca451e15714a26487c764cd3730df",
-      "bytes": 156738,
-      "updatedAt": "2026-10-11T14:43:27.101Z"
+      "sha256": "bea3ca56a2286fa6ab0d6e0d71fe7a7d9ec2277b4c9b9b011d3959fd43639e1f",
+      "bytes": 158149,
+      "updatedAt": "2026-10-23T03:35:04.519Z"
     },
     {
       "id": "shopee-live-order-capture",
@@ -76,11 +76,11 @@
       "id": "shopee-replay-add-order",
       "name": "Shopee 回放加單",
       "namespace": "local.shopee.replay-add-order",
-      "version": "0.1.7",
+      "version": "0.2.3",
       "file": "scripts/shopee-replay-add-order.user.js",
-      "sha256": "47113ec03699c5cf45db20b37b34424b9dee76320ba2d142851c2adc227667e3",
-      "bytes": 1092671,
-      "updatedAt": "2026-10-17T05:56:44.443Z"
+      "sha256": "5509d306a8c32eaefca15c3c03306f10e29c0fba9cdebbaff7350d279bcd2d5b",
+      "bytes": 1145021,
+      "updatedAt": "2026-10-23T03:35:04.519Z"
     },
     {
       "id": "shopee-settlement-notice",
