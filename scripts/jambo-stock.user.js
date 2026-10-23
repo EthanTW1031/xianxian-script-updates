@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jambo 商品庫存
 // @namespace    https://jambolive.tv/
-// @version      2.1.2
+// @version      2.1.3
 // @description  獨立匯出含圖片、成本價與直購價的商品庫存及五欄商品清單 XLSX
 // @match        https://jambolive.tv/console/commodity/*
 // @require      https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js
@@ -16,6 +16,7 @@
   if (!window.location.pathname.startsWith('/console/commodity/')) return;
 
   const PANEL_ID = 'jambo-inventory-export-panel';
+  const SCRIPT_VERSION = '2.1.3';
   const PANEL_POSITION_STORAGE_KEY = 'jambo-inventory-panel-position-v1';
   const PREPARE_BUTTON_ID = 'jambo-load-expand-all';
   const LOAD_MORE_LABEL = '載入更多';
@@ -660,12 +661,90 @@
     return false;
   }
 
-  async function expandAllProducts() {
-    if (getModernTable()) {
-      // 新版款式已直接顯示；核對明細數量，不點擊商品功能按鈕。
-      for (const name of getProductNames()) readModernInventoryRows(name);
-      return { expandedCount: 0, expandableCount: 0 };
+  function getModernInventoryExpandButton(nameElement) {
+    const stockCell = getModernProductRow(nameElement)?.querySelector(':scope > [data-label="總庫存/樣式"]');
+    // Limit clicks to the stock cell's own expand button; never use product actions.
+    const buttons = Array.from(stockCell?.querySelectorAll(':scope > button') || [])
+      .filter((button) => cleanText(button.textContent) === '展開');
+    if (buttons.length > 1) throw new Error(`商品「${getProductName(nameElement)}」展開按鈕不唯一，已停止`);
+    return buttons[0] || null;
+  }
+
+  function findModernProductName(id) {
+    const matches = getProductNames().filter((name) =>
+      cleanText(getModernProductRow(name)?.querySelector(':scope > [data-jb-cell="head"]')?.textContent) === id
+    );
+    if (matches.length > 1) throw new Error(`商品序號 ${id} 重複，請重新搜尋後再試`);
+    return matches[0] || null;
+  }
+
+  async function waitForModernInventory(product, timeout = 5000) {
+    const startedAt = Date.now();
+    let lastError;
+    do {
+      // React may replace a row after expanding it. Resolve by product ID each time.
+      const name = findModernProductName(product.id);
+      if (name) {
+        if (getProductName(name) !== product.name ||
+            cleanText(name.querySelector('.jb-caption')?.textContent) !== product.styleCaption) {
+          throw new Error('展開期間商品名稱或樣式數已變動，請重新搜尋後再試');
+        }
+        try {
+          readModernInventoryRows(name);
+          if (!getModernInventoryExpandButton(name)) return;
+        } catch (error) {
+          if (error?.code !== 'INCOMPLETE_STYLES') throw error;
+          lastError = error;
+        }
+      }
+      await delay(50);
+    } while (Date.now() - startedAt < timeout);
+    throw new Error(`商品「${product.name}」展開後仍未完成：${lastError?.message || '請確認商品仍在目前清單，稍後重新按「載入＋展開全部」'}`);
+  }
+
+  async function expandModernProducts() {
+    const products = getProductNames().map((name) => ({
+      id: cleanText(getModernProductRow(name)?.querySelector(':scope > [data-jb-cell="head"]')?.textContent),
+      name: getProductName(name),
+      styleCaption: cleanText(name.querySelector('.jb-caption')?.textContent),
+    }));
+    if (products.some((product) => !/^\d+$/.test(product.id)) ||
+        new Set(products.map((product) => product.id)).size !== products.length) {
+      throw new Error('商品序號缺漏或重複，請重新搜尋後再試');
     }
+    let expandedCount = 0;
+    for (const [index, product] of products.entries()) {
+      const name = findModernProductName(product.id);
+      if (!name || getProductName(name) !== product.name ||
+          cleanText(name.querySelector('.jb-caption')?.textContent) !== product.styleCaption) {
+        throw new Error('展開期間商品清單已變動，請重新搜尋後再試');
+      }
+      const button = getModernInventoryExpandButton(name);
+      if (button) {
+        if (button.disabled) throw new Error(`商品「${product.name}」展開按鈕尚未可用，請稍後重試`);
+        showStatus(`展開商品款式中：${index + 1}/${products.length}`);
+        button.click();
+        await waitForModernInventory(product);
+        expandedCount += 1;
+      } else {
+        readModernInventoryRows(name);
+      }
+    }
+    const current = getProductNames();
+    if (current.length !== products.length) throw new Error('展開期間商品清單已變動，請重新搜尋後再試');
+    for (const product of products) {
+      const name = findModernProductName(product.id);
+      if (!name || getProductName(name) !== product.name ||
+          cleanText(name.querySelector('.jb-caption')?.textContent) !== product.styleCaption) {
+        throw new Error('展開期間商品清單已變動，請重新搜尋後再試');
+      }
+      readModernInventoryRows(name);
+    }
+    return { expandedCount, expandableCount: expandedCount };
+  }
+
+  async function expandAllProducts() {
+    if (getModernTable()) return expandModernProducts();
     const initialCount = getCollapsedInventoryControls().length;
     let expandedCount = 0;
 
@@ -717,7 +796,7 @@
       const expandResult = await expandAllProducts();
 
       const detail = getModernTable()
-        ? '款式明細已確認'
+        ? `展開 ${expandResult.expandedCount} 個，款式明細已確認`
         : `展開 ${expandResult.expandedCount} 個`;
       showStatus(
         `準備完成：${loadResult.loaded} 個商品，${detail}`
@@ -774,9 +853,12 @@
     const calledLines = Array.from(calledCell.querySelectorAll(':scope > .jb-rowlines > div'));
     const caption = cleanText(nameElement.querySelector('.jb-caption')?.textContent);
     const expected = caption.match(/^(\d+)\s*個樣式$/u);
-    if ((caption && !expected) || stockLines.length !== calledLines.length ||
-        stockLines.length !== (expected ? Number(expected[1]) : 0)) {
-      throw new Error(`商品「${name}」款式明細不完整，請重新載入後再試`);
+    if (caption && !expected) throw new Error(`商品「${name}」樣式數量標示無法辨識：${caption}`);
+    const expectedCount = expected ? Number(expected[1]) : 0;
+    if (stockLines.length !== calledLines.length || stockLines.length !== expectedCount) {
+      const error = new Error(`商品「${name}」款式明細不完整（應有 ${expectedCount} 個，庫存 ${stockLines.length} 個，已喊標 ${calledLines.length} 個），請重新按「載入＋展開全部」`);
+      error.code = 'INCOMPLETE_STYLES';
+      throw error;
     }
     const rows = [['全部', totalStock, totalCalled]];
     const styles = new Set();
@@ -1492,7 +1574,7 @@
       'right:18px',
       'bottom:18px',
       'z-index:2147483647',
-      'width:180px',
+      'width:220px',
       'padding:12px',
       'border:1px solid #d0d5dd',
       'border-radius:12px',
@@ -1506,7 +1588,7 @@
       'display:flex;align-items:center;justify-content:space-between;gap:8px';
 
     const title = document.createElement('div');
-    title.textContent = 'Jambo 商品庫存';
+    title.textContent = `Jambo 商品庫存 v${SCRIPT_VERSION}`;
     title.style.cssText =
       'font-size:15px;font-weight:800;color:#101828;white-space:nowrap';
 
@@ -1568,7 +1650,7 @@
       const isCollapsed = panel.dataset.collapsed === '1';
       panel.dataset.collapsed = isCollapsed ? '0' : '1';
       body.style.display = isCollapsed ? 'block' : 'none';
-      panel.style.width = isCollapsed ? '250px' : '180px';
+      panel.style.width = isCollapsed ? '250px' : '220px';
       toggleButton.textContent = isCollapsed ? '−' : '+';
       toggleButton.title = isCollapsed ? '收合面板' : '展開面板';
       toggleButton.setAttribute(
