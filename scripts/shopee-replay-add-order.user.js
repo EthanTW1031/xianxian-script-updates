@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee 回放加單
 // @namespace    local.shopee.replay-add-order
-// @version      0.2.7
+// @version      0.2.8
 // @description  只讀聊聊回放加單，使用直播解析器，選 JAMBO 匯出檔讀商品清單，輸出獨立回放 CSV 與核對清單
 // @match        https://seller.shopee.tw/new-webchat/conversations*
 // @grant        GM_getValue
@@ -21,6 +21,7 @@
 // 0.2.5 (2026-10-24): search results of type image_with_text are excluded and listed in the audit instead of stopping the run; an identical repeat of the previous page's last result at a page boundary is counted once; a well-formed title with another date ends the current card (Ethan chose 甲); JAMBO codes 預NN are read as XNN like the live capture.
 // 0.2.6 (2026-10-24, GPT review v0.1): a boundary repeat is accepted only while the page size fixed at the start of the run holds and every load so far is whole pages; a page-size change, or a load with no new message while more pages remain, stops the run; a six-digit title that is not a real date no longer ends the current card; the 預NN note no longer says the control app maps it back.
 // 0.2.7 (2026-10-24, real page): a chat opened at the first unread message can stop short of latest_message_id; scroll the message list to the bottom until the latest message is loaded (each scroll must bring new messages, read messages must not change, at most 30 scrolls), then read older messages as before. Ethan asked Claude to change it.
+// 0.2.8 (2026-10-24): control app 0.1.17 maps XNN back to the JAMBO code 預NN automatically; the 預NN note now says so instead of asking staff to fix the file first.
 /* ===== BEGIN ExcelJS 4.4.0 (MIT License, https://github.com/exceljs/exceljs) — verbatim dist/exceljs.min.js, sha256 7e49da68588e250dbb8bba190d2caa8ab3787cc0284bda1d8b2f805c4df742c9 ===== */
 const __REPLAY_EXCELJS__=(function(){var module={exports:{}},exports=module.exports,define;
 /*! ExcelJS 19-10-2023 */
@@ -1101,7 +1102,7 @@ ${lines.join("\n")}`;
         const catalogText = lines.join("\n"), parsed = catalog.parseCatalogTsv(catalogText);
         if (parsed.hasBlockingErrors) throw fail(describeErrors(parsed, fields, parser));
         if (!parsed.validProducts.length) throw fail("沒有可用的商品，請確認選對檔。");
-        return { fileName: name, catalogText, productCount: parsed.validProducts.length, codes: parsed.validProducts.map((p) => p.productCode).sort(ordinal), preorders, warnings: [...preorders.map((p) => `第 ${p.row} 列 ${p.from}：預購商品，照客人的打法當成 ${p.to} 讀，匯出檔寫 ${p.to}（和直播抓單一樣）。控貨助手目前不會自動把 ${p.to} 對到 ${p.from}，進控貨助手前要和直播檔一樣先處理`), ...parsed.warnings.map((w) => `第 ${w.sourceRow} 列 ${String(fields.get(w.sourceRow)?.[0] ?? "").trim()}：${w.message}`)] };
+        return { fileName: name, catalogText, productCount: parsed.validProducts.length, codes: parsed.validProducts.map((p) => p.productCode).sort(ordinal), preorders, warnings: [...preorders.map((p) => `第 ${p.row} 列 ${p.from}：預購商品，照客人的打法當成 ${p.to} 讀，匯出檔寫 ${p.to}（和直播抓單一樣）。控貨助手 0.1.17 起會自動把 ${p.to} 對到 ${p.from}，不用另外處理`), ...parsed.warnings.map((w) => `第 ${w.sourceRow} 列 ${String(fields.get(w.sourceRow)?.[0] ?? "").trim()}：${w.message}`)] };
       }
       module.exports = { SHEET, HEADERS, MAX_BYTES, PREORDER_CODE, cellText, cellValue, describeErrors, readJamboCatalog };
     }
@@ -1214,7 +1215,7 @@ ${lines.join("\n")}`;
       var chat2 = require_chat_runtime();
       var { problem, safeMessage } = require_util();
       var { mountPanel, gmAdapter } = require_panel();
-      var VERSION = "0.2.7";
+      var VERSION = "0.2.8";
       var STORE = Object.freeze({ config: "replay:config:v1", panelPosition: "replay:panel-position:v1" });
       async function initReplay(core2, jambo2, onFormalSuccess = async () => {
       }) {
