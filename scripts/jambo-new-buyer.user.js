@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jambo 新買家檢查
 // @namespace    https://jambolive.tv/
-// @version      4.0.4
+// @version      4.0.5
 // @description  訂單頁掃描 NEW 新買家並匯出含嵌入頭像的 Excel 核對名單
 // @match        https://jambolive.tv/console/order/*
 // @require      https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js
@@ -19,15 +19,53 @@
   'use strict';
   if (!window.location.pathname.startsWith('/console/order/')) return;
   const PANEL_ID = 'jambo-new-buyer-excel-panel';
-  const SCRIPT_VERSION = '4.0.4';
-  if (document.getElementById(PANEL_ID)) return;
+  const SCRIPT_VERSION = '4.0.5';
+  if (document.getElementById(PANEL_ID) || document.documentElement?.hasAttribute('data-ethan-new-buyer-init')) return;
+  document.documentElement?.setAttribute('data-ethan-new-buyer-init','1');
   // Support the current Jambo fan cell and both earlier name layouts.
   const NAME_SELECTOR = '.jb-fan-cell__name, .jb-name-line__name, .fans-info-name';
   const cleanText = value => String(value ?? '').replace(/\s+/g, ' ').trim();
   const delay = ms => new Promise(resolve => window.setTimeout(resolve, ms));
   const state = { busy: false, stop: false, fingerprint: '', stale: false, scope: '', snapshot: null };
   const activeRequests = new Set();
-  let panel;
+  let panel,dock;
+  function dockStart(){dock?.setNotice(false);dock?.status(false);dock?.setBadge({running:true,start:true,reset:true});}
+/* BEGIN ETHAN TOOL DOCK V1 */
+function createEthanToolDock({id,label,name,version,order,colour,panel,collapse,lockRunning=false,lockText='發送中',onOpen=()=>{}}){
+  const doc=panel.ownerDocument;
+  let dock=doc.getElementById('ethan-tool-dock-v1');
+  const css=(node,values)=>{node.style.setProperty('all','initial','important');for(const [key,value]of Object.entries(values))node.style.setProperty(key,value,'important');};
+  if(!dock){dock=doc.createElement('div');dock.id='ethan-tool-dock-v1';css(dock,{position:'fixed',right:'16px',bottom:'16px','z-index':'2147483647',display:'flex',gap:'6px','align-items':'center','pointer-events':'none',margin:'0',padding:'0',transform:'none',float:'none',width:'max-content',height:'auto','max-width':'none','max-height':'none'});doc.documentElement.append(dock);}
+  if(dock.querySelector('[data-dock-tool="'+id+'"]'))return null;
+  const host=doc.createElement('div');host.dataset.dockTool=id;
+  css(host,{display:'block',position:'relative',order:String(order),'pointer-events':'auto',margin:'0',padding:'0',transform:'none',float:'none',width:'max-content',height:'30px','max-width':'none','max-height':'none','flex-shrink':'0'});
+  const shadow=host.attachShadow({mode:'open'});
+  shadow.innerHTML='<style>:host{all:initial}*{box-sizing:border-box}button{position:relative;height:30px;margin:0;padding:0 10px;border:1px solid var(--tool);border-radius:7px;background:var(--tool);color:#fff;box-shadow:0 2px 7px #0003;font:bold 13px/28px "Microsoft JhengHei",sans-serif;white-space:nowrap;cursor:pointer}button.open{background:#fff;color:var(--tool)}button.error{background:#b91c1c;border-color:#b91c1c;color:#fff}.dot{position:absolute;right:-3px;top:-3px;width:8px;height:8px;background:#dc2626;border-radius:50%;box-shadow:0 0 0 1px #fff}.dot[hidden]{display:none}</style><button type="button"><span></span><i class="dot" hidden></i></button>';
+  const button=shadow.querySelector('button'),text=shadow.querySelector('span'),dot=shadow.querySelector('.dot');button.style.setProperty('--tool',colour);
+  if(collapse){for(const [key,value]of Object.entries({'min-width':'52px',width:'auto',height:'28px',padding:'0 6px','font-size':'12px','line-height':'26px','white-space':'nowrap','flex-shrink':'0'}))collapse.style.setProperty(key,value);}
+  dock.append(host);let opened=false,notice=false,serial=0;const phases=new Map();
+  const current=phase=>{if(!phases.has(phase))phases.set(phase,{running:false,error:false,complete:false,done:null,total:null,serial:0});return phases.get(phase);};
+  const busy=()=>[...phases.values()].some(p=>p.running);
+  function render(){const values=[...phases.values()],error=values.some(p=>p.error),active=values.filter(p=>p.running).sort((a,b)=>b.serial-a.serial)[0],complete=values.some(p=>p.complete);let suffix='';
+    if(error)text.textContent='⚠ '+label;
+    else{if(active)suffix=Number.isFinite(active.done)&&Number.isFinite(active.total)&&active.total>0?' '+active.done+'/'+active.total:' 跑中';else if(!opened&&complete)suffix=' ✓';text.textContent=label+suffix;}
+    button.classList.toggle('open',opened);button.classList.toggle('error',error);button.setAttribute('aria-pressed',String(opened));button.title=name+' v'+version+'；點一下'+(opened?'收起':'打開');button.setAttribute('aria-label',button.title);dot.hidden=!notice;
+    if(collapse){const locked=lockRunning&&busy();collapse.disabled=locked;collapse.textContent=locked?lockText:'收合';collapse.title=locked?'跑的時候不能收合；要停請按緊急停止（或停止）':'收合面板';collapse.setAttribute('aria-expanded',String(opened));collapse.setAttribute('aria-label',locked?lockText+'，不能收合':'收合面板');}
+  }
+  function open(){opened=true;for(const p of phases.values())p.complete=false;panel.style.setProperty('visibility','visible','important');panel.inert=false;panel.removeAttribute('aria-hidden');onOpen();render();}
+  function close(focus=true){if(lockRunning&&busy())return false;opened=false;panel.style.setProperty('visibility','hidden','important');panel.inert=true;panel.setAttribute('aria-hidden','true');if(focus)button.focus({preventScroll:true});render();return true;}
+  function toggle(){if(opened)close();else open();}
+  for(const type of ['pointerdown','pointerup','click','dblclick'])host.addEventListener(type,event=>event.stopPropagation());
+  button.addEventListener('click',event=>{event.preventDefault();event.stopPropagation();toggle();});
+  if(collapse)collapse.addEventListener('click',event=>{event.preventDefault();event.stopPropagation();close();});
+  close(false);
+  return {host,button,open,close,toggle,get opened(){return opened;},setNotice(value){notice=!!value;render();},
+    status(error=false,phase='main'){const p=current(phase);p.error=!!error;if(error){p.complete=false;open();}render();},
+    setBadge({phase='main',running,done,total,outcome,start=false,reset=false}={}){if(reset)phases.delete(phase);const p=current(phase);p.serial=++serial;if(typeof running==='boolean')p.running=running;if(Number.isFinite(done))p.done=Math.max(0,Math.floor(done));if(Number.isFinite(total))p.total=Math.max(0,Math.floor(total));if(start){p.error=false;p.complete=false;p.done=null;p.total=null;open();}if(outcome){p.running=false;p.complete=outcome==='complete';if(outcome!=='complete')p.complete=false;}render();},
+    geometry(){const r=panel.getBoundingClientRect();return r.width>0&&r.height>0&&[r.left,r.top,r.width,r.height].every(Number.isFinite)?r:null;}
+  };
+}
+/* END ETHAN TOOL DOCK V1 */
 
   function accountCell(row) {
     const cell = row.querySelector(NAME_SELECTOR)?.closest('td');
@@ -146,10 +184,11 @@
     if (state.scope && scopeFingerprint() !== state.scope) throw new Error('掃描期間搜尋條件已變動，請重新掃描');
   }
 
-  function status(text, warning = false) {
+  function status(text, warning = false, dockKind = 'error') {
     const element = panel.querySelector('[data-role="status"]');
     element.textContent = text;
     element.classList.toggle('jna-warning', warning);
+    if(warning&&dockKind==='notice'){dock?.setBadge({reset:true,running:false});dock?.status(false);dock?.setNotice(true);}else if(warning)dock?.status(true);
   }
 
   async function waitForBatch(previousCount) {
@@ -243,7 +282,7 @@
 
   async function scan() {
     if (state.busy) return;
-    state.busy = true;
+    state.busy = true;dockStart();
     state.stop = false;
     state.stale = false;
     state.scope = scopeFingerprint();
@@ -264,12 +303,13 @@
       if (result.unknownMarkers) issues.push(`${result.unknownMarkers} 筆新客標記無法確認`);
       if (result.missingIds) issues.push(`${result.missingIds} 筆新客訂單缺少帳號 ID，已分別保留`);
       render(result, issues.length === 0, issues.join('；'));
+      if(!issues.length)dock?.setBadge({running:false,outcome:"complete"});
     } catch (error) {
       render(collect(), false, cleanText(error?.message || error));
     } finally {
       state.fingerprint = pageFingerprint();
       if (scopeFingerprint() !== state.scope) state.stale = true;
-      state.busy = false;
+      state.busy = false;dock?.setBadge({running:false});
       panel.querySelector('[data-role="scan"]').disabled = false;
       panel.querySelector('[data-role="stop"]').disabled = true;
       updateExportButton();
@@ -417,6 +457,7 @@
         ensureRunning();
         completed++;
         status(`正在嵌入頭像：${completed}/${buyers.length}`);
+        dock?.setBadge({running:true,done:completed,total:buyers.length});
       }
     }
     // Wait for all workers, including failures, before allowing another operation.
@@ -536,7 +577,7 @@
       state.stale=true; updateExportButton(); status('訂單或標記已變動，請重新掃描後匯出。',true); return;
     }
     if (typeof ExcelJS === 'undefined') { status('Excel 元件未載入，請重新整理或檢查 Tampermonkey 的外部元件下載。',true); return; }
-    state.busy=true; state.stop=false;
+    state.busy=true; state.stop=false;dockStart();
     updateExportButton();
     panel.querySelector('[data-role="scan"]').disabled=true;
     panel.querySelector('[data-role="stop"]').disabled=false;
@@ -555,10 +596,11 @@
       const stamp=dateLabel(snapshot.scannedAt).replace(/[: ]/g,'-');
       triggerDownload(buffer, `${stamp}_新買家名單${snapshot.complete?'':'_結果尚未完整'}.xlsx`);
       status(`已匯出 ${snapshot.buyers.length} 組新買家${failedImages?`；${failedImages} 張頭像未載入，已保留姓名`:''}${snapshot.complete?'':'；結果尚未完整，請見檔案說明'}`,failedImages>0||!snapshot.complete);
+      if(!failedImages&&snapshot.complete)dock?.setBadge({running:false,outcome:"complete"});
     } catch(error) {
       status(`匯出未完成：${cleanText(error?.message||error)}`,true);
     } finally {
-      state.busy=false;
+      state.busy=false;dock?.setBadge({running:false});
       panel.querySelector('[data-role="scan"]').disabled=false;
       panel.querySelector('[data-role="stop"]').disabled=true;
       updateExportButton();
@@ -569,10 +611,8 @@
     if (!document.body || document.getElementById(PANEL_ID)) return;
     const style = element('style');
     style.textContent = `
-      #${PANEL_ID}{position:fixed;right:18px;bottom:18px;z-index:2147483000;width:320px;max-width:calc(100vw - 16px);padding:12px;border:1px solid #d0d5dd;border-radius:12px;background:#fff;color:#24332b;box-shadow:0 8px 28px #182c2426;font:14px/1.5 Arial,"Microsoft JhengHei",sans-serif;box-sizing:border-box}
+      #${PANEL_ID}{position:fixed;right:18px;bottom:56px;z-index:2147483000;width:320px;max-width:calc(100vw - 16px);padding:12px;border:1px solid #d0d5dd;border-radius:12px;background:#fff;color:#24332b;box-shadow:0 8px 28px #182c2426;font:14px/1.5 Arial,"Microsoft JhengHei",sans-serif;box-sizing:border-box}
       #${PANEL_ID} *{box-sizing:border-box}
-      #${PANEL_ID}.jna-collapsed{width:220px}
-      #${PANEL_ID}.jna-collapsed .jna-body{display:none}
       #${PANEL_ID} .jna-header{display:flex;align-items:center;justify-content:space-between;gap:8px}
       #${PANEL_ID} button{cursor:pointer;font:inherit}
       #${PANEL_ID} button:disabled{opacity:.55;cursor:default}
@@ -590,11 +630,11 @@
       #${PANEL_ID} button:focus-visible{outline:3px solid #349a69;outline-offset:2px}
     `;
     document.head.append(style);
-    panel = element('section', undefined, 'jna-collapsed');
+    panel = element('section');
     panel.id = PANEL_ID;
     panel.setAttribute('aria-label', 'Jambo 新買家 Excel');
     panel.innerHTML = `
-      <div class="jna-header"><strong>新買家 Excel v${SCRIPT_VERSION}</strong><button type="button" class="jna-toggle" aria-label="展開新買家 Excel" aria-expanded="false">+</button></div>
+      <div class="jna-header"><strong>新買家 Excel</strong><button type="button" class="jna-toggle">收合</button></div>
       <div class="jna-body">
         <div class="jna-actions"><button type="button" class="jna-scan" data-role="scan">載入全部訂單並掃描</button><button type="button" class="jna-stop" data-role="stop" disabled>停止</button></div>
         <div class="jna-status" data-role="status" role="status" aria-live="polite">按下掃描，整理目前篩選範圍的新買家。</div>
@@ -604,13 +644,7 @@
       </div>`;
     document.body.append(panel);
     let clamp = () => {};
-    panel.querySelector('.jna-toggle').addEventListener('click', event => {
-      const collapsed = panel.classList.toggle('jna-collapsed');
-      event.currentTarget.textContent = collapsed ? '+' : '−';
-      event.currentTarget.setAttribute('aria-expanded', String(!collapsed));
-      event.currentTarget.setAttribute('aria-label', `${collapsed ? '展開' : '收合'}新買家 Excel`);
-      window.requestAnimationFrame(clamp);
-    });
+    dock=createEthanToolDock({id:'jambo-new-buyer',label:'新買家',name:'Jambo 新買家檢查',version:SCRIPT_VERSION,order:10,colour:'#2f6b4f',panel,collapse:panel.querySelector('.jna-toggle'),onOpen:()=>window.requestAnimationFrame(clamp)});
     panel.querySelector('[data-role="scan"]').addEventListener('click', scan);
     panel.querySelector('[data-role="export"]').addEventListener('click', exportExcel);
     panel.querySelector('[data-role="stop"]').addEventListener('click', () => {
@@ -625,7 +659,7 @@
       if (pageFingerprint() !== state.fingerprint) {
         state.stale = true;
         updateExportButton();
-        status('結果需更新：訂單、NEW 標記或搜尋條件已變動，請重新掃描。', true);
+        status('結果需更新：訂單、NEW 標記或搜尋條件已變動，請重新掃描。', true, 'notice');
       }
     }
     const observer = new MutationObserver(mutations => {

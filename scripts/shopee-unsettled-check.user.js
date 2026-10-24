@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee 未結標查詢
 // @namespace    local.shopee.unsettled-check
-// @version      0.1.1
+// @version      0.1.2
 // @description  匯入發送表，唯讀核對期限內一元賣場下單金額，列出未結單與人工待核名單
 // @match        https://seller.shopee.tw/portal/sale/order*
 // @require      https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js
@@ -13,7 +13,7 @@
 /* global ExcelJS, GM_getValue, GM_setValue, GM_registerMenuCommand, module */
 (function unsettledCheck() {
   "use strict";
-  const VERSION = "0.1.1";
+  const VERSION = "0.1.2";
   // Monetary engine: exact function text from detail 1.5.0, SHA256 cbeec4328f3350f212330678b32f69eba67ca451e15714a26487c764cd3730df.
   const DetailCore = (() => {
   const SHIPPING_NOTICE = "僅限使用蝦皮店到店/711/全家/新竹物流方式結單";
@@ -1454,6 +1454,43 @@
     return wb;
   }
 
+/* BEGIN ETHAN TOOL DOCK V1 */
+function createEthanToolDock({id,label,name,version,order,colour,panel,collapse,lockRunning=false,lockText='發送中',onOpen=()=>{}}){
+  const doc=panel.ownerDocument;
+  let dock=doc.getElementById('ethan-tool-dock-v1');
+  const css=(node,values)=>{node.style.setProperty('all','initial','important');for(const [key,value]of Object.entries(values))node.style.setProperty(key,value,'important');};
+  if(!dock){dock=doc.createElement('div');dock.id='ethan-tool-dock-v1';css(dock,{position:'fixed',right:'16px',bottom:'16px','z-index':'2147483647',display:'flex',gap:'6px','align-items':'center','pointer-events':'none',margin:'0',padding:'0',transform:'none',float:'none',width:'max-content',height:'auto','max-width':'none','max-height':'none'});doc.documentElement.append(dock);}
+  if(dock.querySelector('[data-dock-tool="'+id+'"]'))return null;
+  const host=doc.createElement('div');host.dataset.dockTool=id;
+  css(host,{display:'block',position:'relative',order:String(order),'pointer-events':'auto',margin:'0',padding:'0',transform:'none',float:'none',width:'max-content',height:'30px','max-width':'none','max-height':'none','flex-shrink':'0'});
+  const shadow=host.attachShadow({mode:'open'});
+  shadow.innerHTML='<style>:host{all:initial}*{box-sizing:border-box}button{position:relative;height:30px;margin:0;padding:0 10px;border:1px solid var(--tool);border-radius:7px;background:var(--tool);color:#fff;box-shadow:0 2px 7px #0003;font:bold 13px/28px "Microsoft JhengHei",sans-serif;white-space:nowrap;cursor:pointer}button.open{background:#fff;color:var(--tool)}button.error{background:#b91c1c;border-color:#b91c1c;color:#fff}.dot{position:absolute;right:-3px;top:-3px;width:8px;height:8px;background:#dc2626;border-radius:50%;box-shadow:0 0 0 1px #fff}.dot[hidden]{display:none}</style><button type="button"><span></span><i class="dot" hidden></i></button>';
+  const button=shadow.querySelector('button'),text=shadow.querySelector('span'),dot=shadow.querySelector('.dot');button.style.setProperty('--tool',colour);
+  if(collapse){for(const [key,value]of Object.entries({'min-width':'52px',width:'auto',height:'28px',padding:'0 6px','font-size':'12px','line-height':'26px','white-space':'nowrap','flex-shrink':'0'}))collapse.style.setProperty(key,value);}
+  dock.append(host);let opened=false,notice=false,serial=0;const phases=new Map();
+  const current=phase=>{if(!phases.has(phase))phases.set(phase,{running:false,error:false,complete:false,done:null,total:null,serial:0});return phases.get(phase);};
+  const busy=()=>[...phases.values()].some(p=>p.running);
+  function render(){const values=[...phases.values()],error=values.some(p=>p.error),active=values.filter(p=>p.running).sort((a,b)=>b.serial-a.serial)[0],complete=values.some(p=>p.complete);let suffix='';
+    if(error)text.textContent='⚠ '+label;
+    else{if(active)suffix=Number.isFinite(active.done)&&Number.isFinite(active.total)&&active.total>0?' '+active.done+'/'+active.total:' 跑中';else if(!opened&&complete)suffix=' ✓';text.textContent=label+suffix;}
+    button.classList.toggle('open',opened);button.classList.toggle('error',error);button.setAttribute('aria-pressed',String(opened));button.title=name+' v'+version+'；點一下'+(opened?'收起':'打開');button.setAttribute('aria-label',button.title);dot.hidden=!notice;
+    if(collapse){const locked=lockRunning&&busy();collapse.disabled=locked;collapse.textContent=locked?lockText:'收合';collapse.title=locked?'跑的時候不能收合；要停請按緊急停止（或停止）':'收合面板';collapse.setAttribute('aria-expanded',String(opened));collapse.setAttribute('aria-label',locked?lockText+'，不能收合':'收合面板');}
+  }
+  function open(){opened=true;for(const p of phases.values())p.complete=false;panel.style.setProperty('visibility','visible','important');panel.inert=false;panel.removeAttribute('aria-hidden');onOpen();render();}
+  function close(focus=true){if(lockRunning&&busy())return false;opened=false;panel.style.setProperty('visibility','hidden','important');panel.inert=true;panel.setAttribute('aria-hidden','true');if(focus)button.focus({preventScroll:true});render();return true;}
+  function toggle(){if(opened)close();else open();}
+  for(const type of ['pointerdown','pointerup','click','dblclick'])host.addEventListener(type,event=>event.stopPropagation());
+  button.addEventListener('click',event=>{event.preventDefault();event.stopPropagation();toggle();});
+  if(collapse)collapse.addEventListener('click',event=>{event.preventDefault();event.stopPropagation();close();});
+  close(false);
+  return {host,button,open,close,toggle,get opened(){return opened;},setNotice(value){notice=!!value;render();},
+    status(error=false,phase='main'){const p=current(phase);p.error=!!error;if(error){p.complete=false;open();}render();},
+    setBadge({phase='main',running,done,total,outcome,start=false,reset=false}={}){if(reset)phases.delete(phase);const p=current(phase);p.serial=++serial;if(typeof running==='boolean')p.running=running;if(Number.isFinite(done))p.done=Math.max(0,Math.floor(done));if(Number.isFinite(total))p.total=Math.max(0,Math.floor(total));if(start){p.error=false;p.complete=false;p.done=null;p.total=null;open();}if(outcome){p.running=false;p.complete=outcome==='complete';if(outcome!=='complete')p.complete=false;}render();},
+    geometry(){const r=panel.getBoundingClientRect();return r.width>0&&r.height>0&&[r.left,r.top,r.width,r.height].every(Number.isFinite)?r:null;}
+  };
+}
+/* END ETHAN TOOL DOCK V1 */
+
   function mount() {
     if(location.origin!==ORIGIN||location.pathname!=="/portal/sale/order"||document.querySelector("[data-unsettled-check]")) return;
     const host=document.createElement("div");host.dataset.unsettledCheck="1";
@@ -1463,7 +1500,7 @@
       *{box-sizing:border-box}section{width:min(780px,calc(100vw - 24px));max-height:85vh;background:#fff;border:1px solid #a9c1c9;border-radius:12px;box-shadow:0 8px 32px #0003;overflow:hidden}
       header{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;background:#175866;color:white;cursor:move}h2{font-size:17px;margin:0}button,input,select{font:inherit}button{cursor:pointer;border:1px solid #aec7ce;border-radius:5px;background:#f0f6f7;padding:6px 10px;color:#174753}button:disabled{opacity:.45;cursor:default}header button{background:white}
       main{padding:14px;max-height:calc(85vh - 52px);overflow:auto}label{display:inline-block;margin:5px 8px 5px 0}input[type=date],input[type=text],select{border:1px solid #a9bfc5;border-radius:4px;padding:5px;max-width:100%}input[type=text]{width:260px}input[data-session]{width:190px}.files>div{margin:8px 0;padding:8px;background:#f3f7f8;border-radius:6px}.muted{color:#526b73;font-size:12px}.warn{color:#855800;background:#fff4d9;padding:7px;white-space:pre-wrap}.error{color:#a30020;white-space:pre-wrap}.status{white-space:pre-wrap;margin:10px 0}table{border-collapse:collapse;font-size:12px;min-width:620px;width:100%}th,td{padding:6px;border-bottom:1px solid #d9e2e5;text-align:left;vertical-align:top}th{background:#eef5f6;white-space:nowrap}.scroll{overflow:auto}td.note{min-width:210px}.banner{font-size:18px;font-weight:bold;padding:10px;background:#e5f3f2;margin:8px 0}.banner.reminder{color:#a50020;background:#fff0ef}.hide{display:none}summary{cursor:pointer;font-weight:bold}fieldset{border:1px solid #cad9de;margin:10px 0;padding:8px}.action{background:#175866;color:white}.stop{color:#9c1630}
-    </style><section><header><h2>Shopee 未結標查詢 ${VERSION}</h2><button data-collapse>收合</button></header><main>
+    </style><section><header><h2>Shopee 未結標查詢</h2><button data-collapse>收合</button></header><main>
       <p class="muted">匯入本期全部發送表，核對一元賣場下單金額。退貨退款及身份疑義另列人工待核。</p>
       <label>發送表（可多選） <input data-files type="file" accept=".xlsx" multiple></label>
       <div class="files" data-files-list></div>
@@ -1484,13 +1521,17 @@
       return [...document.querySelectorAll('a[href]')].map(link=>link.href)
         .filter(href=>/^https:\/\/seller\.shopee\.tw\/portal\/sale\/order\/\d+(?:[?#].*)?$/.test(href)).join("\n");
     }
+    const dock=createEthanToolDock({id:'unsettled',label:'未結標',name:'Shopee 未結標查詢',version:VERSION,order:10,colour:'#175866',panel:host,collapse:$("[data-collapse]")});
+    let dockError='';
+    function dockBegin(phase){dockError='';dock.status(false);dock.setBadge({phase:'main',running:true,start:true,reset:true});}
     const runs=runState(),downloadUrls=new Set(); let currentUrl=location.href,currentOrderList=orderListSignature();
-    const status=(message,error=false)=>{$("[data-status]").textContent=message;$("[data-status]").classList.toggle("error",error);};
+    const status=(message,error=false)=>{$("[data-status]").textContent=message;$("[data-status]").classList.toggle("error",error);if(error&&dockError!==message){dockError=message;dock.status(true);}};
     function buttons() {
       $("[data-start]").disabled=state.running||state.importing;$("[data-stop]").disabled=!state.running;
       $("[data-copy]").disabled=!runs.result||!root.querySelector("[data-category]:checked");$("[data-export]").disabled=!runs.result;
     }
     function invalidate(message="輸入或頁面已變更，請重新查詢。") {
+      dock.setBadge({running:false,outcome:"cancelled"});
       runs.invalidate();state.running=false;state.activeRun=null;$("[data-result]").classList.add("hide");$("[data-categories]").replaceChildren();buttons();status(message);
     }
     function closing() {const value=$("[data-closing]").value;if(value)dateStart(value);return value;}
@@ -1514,7 +1555,7 @@
     const bytesById=new Map();
     $("[data-files]").addEventListener("change",async event=>{
       const fileInput=event.target,files=[...fileInput.files];
-      invalidate("正在讀取發送表……");state.importing=true;buttons();const token=runs.begin();
+      invalidate("正在讀取發送表……");state.importing=true;dockBegin("import");buttons();const token=runs.begin();
       try {
         const added=[];
         for(const file of files) {
@@ -1524,7 +1565,7 @@
         }
         if(!runs.valid(token))return;
         state.entries.push(...added);state.choices={};$("[data-lower-confirm]").checked=false;render();status(added.some(e=>e.error)?"有檔案讀不到，請移除錯誤檔並重新匯入。":"已讀取發送表，請核對來源、費率與起點。",added.some(e=>e.error));
-      } finally {state.importing=false;fileInput.value="";buttons();}
+      } finally {state.importing=false;dock.setBadge({running:false});fileInput.value="";buttons();}
     });
     $("[data-files-list]").addEventListener("click",event=>{
       const id=event.target.closest("[data-remove]")?.dataset.remove;if(!id)return;
@@ -1535,10 +1576,10 @@
       const entry=state.entries.find(e=>e.id===(event.target.dataset.session||event.target.dataset.fee));if(!entry)return;
       invalidate();state.choices={};$("[data-lower-confirm]").checked=false;
       if(event.target.matches("[data-session]")){entry.sessionOverride=event.target.value;render();return;}
-      state.importing=true;buttons();const token=runs.begin();
+      state.importing=true;dockBegin("import");buttons();const token=runs.begin();
       try {const updated=await importBook(bytesById.get(entry.id),entry.name,entry.id,event.target.checked);if(runs.valid(token)){Object.assign(entry,updated);render();}}
       catch(e){if(runs.valid(token)){entry.error=e.message;render();status(e.message,true);}}
-      finally{state.importing=false;buttons();}
+      finally{state.importing=false;dock.setBadge({running:false});buttons();}
     });
     $("[data-conflicts]").addEventListener("change",e=>{invalidate();state.choices[e.target.dataset.choice]=e.target.value;render();});
     for(const selector of ["[data-closing]","[data-lower]","[data-whitelist]"]) $(selector).addEventListener("input",()=>{
@@ -1560,13 +1601,13 @@
         ensure(location.pathname==="/portal/sale/order","PAGE","請回到我的銷售訂單清單");
         render();ensure(!state.prepared.issues.length,"INPUT",state.prepared.issues.join("\n"));ensure($("[data-lower-confirm]").checked,"INPUT","請勾選確認查詢起點與推定年份");
         const w=makeWindow(closing(),$("[data-lower]").value),whitelist=parseWhitelist($("[data-whitelist]").value);cookieToken(document.cookie);
-        token=runs.begin();state.activeRun=token;state.running=true;buttons();status("開始讀取訂單，第1遍……");
+        token=runs.begin();state.activeRun=token;state.running=true;dockBegin("query");buttons();status("開始讀取訂單，第1遍……");
         const api=createApi({signal:token.signal});
         const result=await reconcile(api,state.prepared.buyers,w,whitelist,token.signal,p=>{if(runs.valid(token))status(`第${p.phase}遍／第${p.page}頁：已讀${p.indexCount}筆（${p.unique}個ID），讀到${taipei(p.oldest)}`);});
         result.meta.whitelist=[...whitelist];result.meta.selections=state.prepared.selections;
-        runs.publish(token,result);showResult(result);status("讀取完成；兩遍固定區間ID一致。請逐位核對後選類別複製或匯出。");
+        runs.publish(token,result);showResult(result);dock.setBadge({running:false,outcome:"complete"});status("讀取完成；兩遍固定區間ID一致。請逐位核對後選類別複製或匯出。");
       } catch(e) {if(!token||runs.valid(token)){runs.invalidate();$("[data-result]").classList.add("hide");status(`沒有讀完，不能用：${e.message}`,true);}}
-      finally {if(state.activeRun===token){state.running=false;state.activeRun=null;}buttons();}
+      finally {if(state.activeRun===token){state.running=false;state.activeRun=null;}dock.setBadge({running:state.running||state.importing});buttons();}
     });
     $("[data-stop]").addEventListener("click",()=>invalidate("已停止，這輪結果作廢。"));
     $("[data-copy]").addEventListener("click",async()=>{
@@ -1575,7 +1616,7 @@
     $("[data-export]").addEventListener("click",async()=>{
       try {const result=runs.result,wb=exportBook(result);const bytes=await wb.xlsx.writeBuffer();ensure(result&&result===runs.result,"STALE","結果已失效，未匯出");const url=URL.createObjectURL(new Blob([bytes],{type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}));downloadUrls.add(url);const a=document.createElement("a");a.href=url;a.download=`${result.window.reminder?"提醒名單":"逾期名單"}_${result.window.closing}_未結標核對.xlsx`;a.click();setTimeout(()=>{downloadUrls.delete(url);URL.revokeObjectURL(url);},1000);}catch(e){status(e.message,true);}
     });
-    $("[data-collapse]").addEventListener("click",()=>{state.closed=!state.closed;$("main").classList.toggle("hide",state.closed);$("[data-collapse]").textContent=state.closed?"展開":"收合";});
+    
     const positionKey="unsettled:panel-position:v1";
     function place(p) {if(!p||!Number.isFinite(p.x)||!Number.isFinite(p.y))return;host.style.right="auto";host.style.left=Math.max(0,Math.min(p.x,innerWidth-70))+"px";host.style.top=Math.max(0,Math.min(p.y,innerHeight-45))+"px";}
     try{if(typeof GM_getValue==="function")place(GM_getValue(positionKey,null));}catch{}
@@ -1588,7 +1629,7 @@
       if(location.href!==currentUrl){currentUrl=location.href;invalidate("頁面已切換，舊結果作廢。");}
       else if(list!==currentOrderList&&(state.running||runs.result))invalidate("訂單清單已切換，舊結果作廢。");
       currentOrderList=list;
-      host.style.display=location.pathname==="/portal/sale/order"?"":"none";
+      const supported=location.pathname==="/portal/sale/order";host.style.display=supported?"":"none";dock.host.style.setProperty("display",supported?"block":"none","important");
     }
     addEventListener("popstate",routeChanged);addEventListener("hashchange",routeChanged);addEventListener("pagehide",()=>invalidate("頁面已離開，查詢停止。"));
     window.navigation?.addEventListener("navigate",event=>{if(!downloadUrls.has(event.destination.url))invalidate("頁面正在切換，查詢停止。");});
