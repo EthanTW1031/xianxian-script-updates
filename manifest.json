@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "publishedAt": "2026-10-23T03:49:32.415Z",
+  "publishedAt": "2026-10-24T08:35:17.084Z",
   "scripts": [
     {
       "id": "fb-inbox-finder",
@@ -26,41 +26,41 @@
       "id": "jambo-product-image-batch-upload",
       "name": "Jambo 商品圖片批次上傳",
       "namespace": "https://jambolive.tv/",
-      "version": "1.0.4",
+      "version": "1.0.5",
       "file": "scripts/jambo-product-image-batch-upload.user.js",
-      "sha256": "424ce47b4ca62e6f79940435f1460d7d6fafe689c286e7b264f3f45fc3db969b",
-      "bytes": 45101,
-      "updatedAt": "2026-09-25T06:48:20.407Z"
+      "sha256": "b7ea8d0c29994b8c5b5cf4daca90fb3fe5ad821e3c629ed5cf87c9b90f65a366",
+      "bytes": 50893,
+      "updatedAt": "2026-10-24T08:35:17.084Z"
     },
     {
       "id": "jambo-stock",
       "name": "Jambo 商品庫存",
       "namespace": "https://jambolive.tv/",
-      "version": "2.1.4",
+      "version": "2.1.5",
       "file": "scripts/jambo-stock.user.js",
-      "sha256": "3e597a7f7043f81eb636911ec4e5bb998d2089410fc4467b659198ff09a43585",
-      "bytes": 54658,
-      "updatedAt": "2026-10-23T03:49:32.415Z"
+      "sha256": "8245414fcc09a963af4203f7389e601cf2455ba17338237b4c7ce1f8f726332d",
+      "bytes": 60396,
+      "updatedAt": "2026-10-24T08:35:17.084Z"
     },
     {
       "id": "shopee-account-precheck",
       "name": "Shopee 帳號預檢",
       "namespace": "local.shopee.account-precheck",
-      "version": "0.4.3",
+      "version": "0.4.7",
       "file": "scripts/shopee-account-precheck.user.js",
-      "sha256": "54071abb8c08efaea74b655975f48169d0271e042719e67949f52fbba14f0cb4",
-      "bytes": 126188,
-      "updatedAt": "2026-10-23T03:35:04.519Z"
+      "sha256": "f0887ab0300eeb336dfd16504f38821c94950bff583c14e14370f7a8085b04d5",
+      "bytes": 137004,
+      "updatedAt": "2026-10-24T08:35:17.084Z"
     },
     {
       "id": "shopee-auto-detail-reply",
       "name": "Shopee 自動回覆明細",
       "namespace": "local.shopee.auto-reply-detail",
-      "version": "1.6.1",
+      "version": "1.6.2",
       "file": "scripts/shopee-auto-detail-reply.user.js",
-      "sha256": "bea3ca56a2286fa6ab0d6e0d71fe7a7d9ec2277b4c9b9b011d3959fd43639e1f",
-      "bytes": 158149,
-      "updatedAt": "2026-10-23T03:35:04.519Z"
+      "sha256": "1d8cf4f39993aaff309628b2d75a505670fe45d76025ef9cf5bfbe2cdfb5e70b",
+      "bytes": 164325,
+      "updatedAt": "2026-10-24T08:35:17.084Z"
     },
     {
       "id": "shopee-live-order-capture",
@@ -76,21 +76,21 @@
       "id": "shopee-replay-add-order",
       "name": "Shopee 回放加單",
       "namespace": "local.shopee.replay-add-order",
-      "version": "0.2.3",
+      "version": "0.2.7",
       "file": "scripts/shopee-replay-add-order.user.js",
-      "sha256": "5509d306a8c32eaefca15c3c03306f10e29c0fba9cdebbaff7350d279bcd2d5b",
-      "bytes": 1145021,
-      "updatedAt": "2026-10-23T03:35:04.519Z"
+      "sha256": "6f7604f2799ad185a9cf2e54bc63409a1d00f92ed1deb56cb639ebd548604d47",
+      "bytes": 1159518,
+      "updatedAt": "2026-10-24T08:35:17.084Z"
     },
     {
       "id": "shopee-settlement-notice",
       "name": "Shopee 多場結單通知",
       "namespace": "local.shopee.settlement-notice",
-      "version": "0.2.1",
+      "version": "0.2.2",
       "file": "scripts/shopee-settlement-notice.user.js",
-      "sha256": "32442517f6867e83879e48341a23f94b736c6b927e5e33e9ef466733975532c7",
-      "bytes": 47366,
-      "updatedAt": "2026-10-21T07:35:57.345Z"
+      "sha256": "11b6b50379882c665a8a4d0c41a30af9d7db9bcd137a39bf95d2962496c3b847",
+      "bytes": 54365,
+      "updatedAt": "2026-10-24T08:35:17.084Z"
     },
     {
       "id": "shopee-unsettled-check",

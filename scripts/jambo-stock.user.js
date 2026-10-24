@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jambo 商品庫存
 // @namespace    https://jambolive.tv/
-// @version      2.1.4
+// @version      2.1.5
 // @description  獨立匯出含圖片、成本價與直購價的商品庫存及五欄商品清單 XLSX
 // @match        https://jambolive.tv/console/commodity/*
 // @require      https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js
@@ -12,10 +12,49 @@
 
 (() => {
   'use strict';
+/* BEGIN ETHAN TOOL DOCK V1 */
+function createEthanToolDock({id,label,name,version,order,colour,panel,collapse,lockRunning=false,lockText='發送中',onOpen=()=>{}}){
+  const doc=panel.ownerDocument;
+  let dock=doc.getElementById('ethan-tool-dock-v1');
+  const css=(node,values)=>{node.style.setProperty('all','initial','important');for(const [key,value]of Object.entries(values))node.style.setProperty(key,value,'important');};
+  if(!dock){dock=doc.createElement('div');dock.id='ethan-tool-dock-v1';css(dock,{position:'fixed',right:'16px',bottom:'16px','z-index':'2147483647',display:'flex',gap:'6px','align-items':'center','pointer-events':'none',margin:'0',padding:'0',transform:'none',float:'none',width:'max-content',height:'auto','max-width':'none','max-height':'none'});doc.documentElement.append(dock);}
+  if(dock.querySelector('[data-dock-tool="'+id+'"]'))return null;
+  const host=doc.createElement('div');host.dataset.dockTool=id;
+  css(host,{display:'block',position:'relative',order:String(order),'pointer-events':'auto',margin:'0',padding:'0',transform:'none',float:'none',width:'max-content',height:'30px','max-width':'none','max-height':'none','flex-shrink':'0'});
+  const shadow=host.attachShadow({mode:'open'});
+  shadow.innerHTML='<style>:host{all:initial}*{box-sizing:border-box}button{position:relative;height:30px;margin:0;padding:0 10px;border:1px solid var(--tool);border-radius:7px;background:var(--tool);color:#fff;box-shadow:0 2px 7px #0003;font:bold 13px/28px "Microsoft JhengHei",sans-serif;white-space:nowrap;cursor:pointer}button.open{background:#fff;color:var(--tool)}button.error{background:#b91c1c;border-color:#b91c1c;color:#fff}.dot{position:absolute;right:-3px;top:-3px;width:8px;height:8px;background:#dc2626;border-radius:50%;box-shadow:0 0 0 1px #fff}.dot[hidden]{display:none}</style><button type="button"><span></span><i class="dot" hidden></i></button>';
+  const button=shadow.querySelector('button'),text=shadow.querySelector('span'),dot=shadow.querySelector('.dot');button.style.setProperty('--tool',colour);
+  if(collapse){for(const [key,value]of Object.entries({'min-width':'52px',width:'auto',height:'28px',padding:'0 6px','font-size':'12px','line-height':'26px','white-space':'nowrap','flex-shrink':'0'}))collapse.style.setProperty(key,value);}
+  dock.append(host);let opened=false,notice=false,serial=0;const phases=new Map();
+  const current=phase=>{if(!phases.has(phase))phases.set(phase,{running:false,error:false,complete:false,done:null,total:null,serial:0});return phases.get(phase);};
+  const busy=()=>[...phases.values()].some(p=>p.running);
+  function render(){const values=[...phases.values()],error=values.some(p=>p.error),active=values.filter(p=>p.running).sort((a,b)=>b.serial-a.serial)[0],complete=values.some(p=>p.complete);let suffix='';
+    if(error)text.textContent='⚠ '+label;
+    else{if(active)suffix=Number.isFinite(active.done)&&Number.isFinite(active.total)&&active.total>0?' '+active.done+'/'+active.total:' 跑中';else if(!opened&&complete)suffix=' ✓';text.textContent=label+suffix;}
+    button.classList.toggle('open',opened);button.classList.toggle('error',error);button.setAttribute('aria-pressed',String(opened));button.title=name+' v'+version+'；點一下'+(opened?'收起':'打開');button.setAttribute('aria-label',button.title);dot.hidden=!notice;
+    if(collapse){const locked=lockRunning&&busy();collapse.disabled=locked;collapse.textContent=locked?lockText:'收合';collapse.title=locked?'跑的時候不能收合；要停請按緊急停止（或停止）':'收合面板';collapse.setAttribute('aria-expanded',String(opened));collapse.setAttribute('aria-label',locked?lockText+'，不能收合':'收合面板');}
+  }
+  function open(){opened=true;for(const p of phases.values())p.complete=false;panel.style.setProperty('visibility','visible','important');panel.inert=false;panel.removeAttribute('aria-hidden');onOpen();render();}
+  function close(focus=true){if(lockRunning&&busy())return false;opened=false;panel.style.setProperty('visibility','hidden','important');panel.inert=true;panel.setAttribute('aria-hidden','true');if(focus)button.focus({preventScroll:true});render();return true;}
+  function toggle(){if(opened)close();else open();}
+  for(const type of ['pointerdown','pointerup','click','dblclick'])host.addEventListener(type,event=>event.stopPropagation());
+  button.addEventListener('click',event=>{event.preventDefault();event.stopPropagation();toggle();});
+  if(collapse)collapse.addEventListener('click',event=>{event.preventDefault();event.stopPropagation();close();});
+  close(false);
+  return {host,button,open,close,toggle,get opened(){return opened;},setNotice(value){notice=!!value;render();},
+    status(error=false,phase='main'){const p=current(phase);p.error=!!error;if(error){p.complete=false;open();}render();},
+    setBadge({phase='main',running,done,total,outcome,start=false,reset=false}={}){if(reset)phases.delete(phase);const p=current(phase);p.serial=++serial;if(typeof running==='boolean')p.running=running;if(Number.isFinite(done))p.done=Math.max(0,Math.floor(done));if(Number.isFinite(total))p.total=Math.max(0,Math.floor(total));if(start){p.error=false;p.complete=false;p.done=null;p.total=null;open();}if(outcome){p.running=false;p.complete=outcome==='complete';if(outcome!=='complete')p.complete=false;}render();},
+    geometry(){const r=panel.getBoundingClientRect();return r.width>0&&r.height>0&&[r.left,r.top,r.width,r.height].every(Number.isFinite)?r:null;}
+  };
+}
+/* END ETHAN TOOL DOCK V1 */
+  let dock=null;
 
   if (!window.location.pathname.startsWith('/console/commodity/')) return;
 
   const PANEL_ID = 'jambo-inventory-export-panel';
+  if(document.documentElement.hasAttribute('data-ethan-boot-stock'))return;
+  document.documentElement.setAttribute('data-ethan-boot-stock','1');
   const PANEL_POSITION_STORAGE_KEY = 'jambo-inventory-panel-position-v1';
   const PREPARE_BUTTON_ID = 'jambo-load-expand-all';
   const LOAD_MORE_LABEL = '載入更多';
@@ -721,6 +760,7 @@
       const button = getModernInventoryExpandButton(name);
       if (button) {
         if (button.disabled) throw new Error(`商品「${product.name}」展開按鈕尚未可用，請稍後重試`);
+        dock?.setBadge({running:true,done:index+1,total:products.length});
         showStatus(`展開商品款式中：${index + 1}/${products.length}`);
         button.click();
         await waitForModernInventory(product);
@@ -762,6 +802,7 @@
       if (!didExpand) break;
 
       expandedCount += 1;
+      dock?.setBadge({running:true,done:expandedCount,total:initialCount});
       showStatus(`展開商品中：${expandedCount}/${initialCount}`);
     }
 
@@ -780,7 +821,8 @@
     const panel = document.getElementById(PANEL_ID);
     if (!panel) return;
 
-    for (const button of panel.querySelectorAll('button')) {
+    dock?.setBadge({running:isBusy,start:isBusy});
+    for (const button of panel.querySelectorAll('button:not([data-dock-collapse])')) {
       button.disabled = isBusy;
       button.style.opacity = isBusy ? '0.65' : '1';
       button.style.cursor = isBusy ? 'wait' : 'pointer';
@@ -794,6 +836,7 @@
       const loadResult = await loadAllProducts();
       const expandResult = await expandAllProducts();
 
+      dock?.setBadge({outcome:"complete"});
       const detail = getModernTable()
         ? `展開 ${expandResult.expandedCount} 個，款式明細已確認`
         : `展開 ${expandResult.expandedCount} 個`;
@@ -1015,6 +1058,7 @@
     );
     if (!statusElement) return;
 
+    dock?.status(isError);
     statusElement.textContent = message;
     statusElement.style.color = isError ? '#b42318' : '#067647';
   }
@@ -1532,6 +1576,7 @@
       showStatus(
         `已下載 XLSX：${loadResult.loaded} 個商品、${result.outputRows.length} 筆庫存、${xlsx.catalogProductCount} 筆五欄商品${imageWarning}${catalogWarning}${inventoryPriceWarning}`
       );
+      dock?.setBadge({outcome:'complete'});
       console.log(
         '[Jambo 商品庫存] XLSX 完成',
         loadResult,
@@ -1571,9 +1616,10 @@
     panel.style.cssText = [
       'position:fixed',
       'right:18px',
-      'bottom:18px',
-      'z-index:2147483647',
-      'width:180px',
+      'bottom:56px',
+      'visibility:hidden',
+      'z-index:2147483646',
+      'width:250px',
       'padding:12px',
       'border:1px solid #d0d5dd',
       'border-radius:12px',
@@ -1615,7 +1661,7 @@
 
     const body = document.createElement('div');
     body.style.marginTop = '9px';
-    body.style.display = 'none';
+    body.style.display = 'block';
 
     const prepareButton = createButton(
       '載入＋展開全部',
@@ -1642,25 +1688,12 @@
 
     body.append(prepareButton, xlsxButton, status);
     panel.append(titleBar, body);
-    panel.dataset.collapsed = '1';
+    panel.dataset.collapsed = '0';
+    toggleButton.dataset.dockCollapse='1';
     let clampPanelPosition = () => {};
 
-    toggleButton.addEventListener('click', () => {
-      const isCollapsed = panel.dataset.collapsed === '1';
-      panel.dataset.collapsed = isCollapsed ? '0' : '1';
-      body.style.display = isCollapsed ? 'block' : 'none';
-      panel.style.width = isCollapsed ? '250px' : '180px';
-      toggleButton.textContent = isCollapsed ? '−' : '+';
-      toggleButton.title = isCollapsed ? '收合面板' : '展開面板';
-      toggleButton.setAttribute(
-        'aria-label',
-        isCollapsed ? '收合商品庫存面板' : '展開商品庫存面板'
-      );
-      toggleButton.setAttribute('aria-expanded', String(isCollapsed));
-      window.requestAnimationFrame(clampPanelPosition);
-    });
-
     document.body.appendChild(panel);
+    dock=createEthanToolDock({id:"jambo-stock",label:"庫存",name:"Jambo 商品庫存",version:"2.1.5",order:20,colour:"#1d4ed8",panel,collapse:toggleButton});
     clampPanelPosition = makePanelDraggable(
       panel,
       titleBar,
@@ -1671,7 +1704,11 @@
   mountPanel();
 
   const observer = new MutationObserver(() => {
-    if (!document.getElementById(PANEL_ID)) mountPanel();
+    if (!document.getElementById(PANEL_ID)) {
+      document.querySelector('#ethan-tool-dock-v1 > [data-dock-tool="jambo-stock"]')?.remove();
+      dock = null;
+      mountPanel();
+    }
   });
   observer.observe(document.documentElement, {
     childList: true,

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee 自動回覆明細
 // @namespace    local.shopee.auto-reply-detail
-// @version      1.6.1
+// @version      1.6.2
 // @description  聊聊頁手動匯入已審核 Excel，預覽後安全逐筆發送
 // @match        https://seller.shopee.tw/new-webchat/conversations*
 // @require      https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js
@@ -15,10 +15,46 @@
 
 (function shopeeAutoReplyDetail() {
   "use strict";
+/* BEGIN ETHAN TOOL DOCK V1 */
+function createEthanToolDock({id,label,name,version,order,colour,panel,collapse,lockRunning=false,lockText='發送中',onOpen=()=>{}}){
+  const doc=panel.ownerDocument;
+  let dock=doc.getElementById('ethan-tool-dock-v1');
+  const css=(node,values)=>{node.style.setProperty('all','initial','important');for(const [key,value]of Object.entries(values))node.style.setProperty(key,value,'important');};
+  if(!dock){dock=doc.createElement('div');dock.id='ethan-tool-dock-v1';css(dock,{position:'fixed',right:'16px',bottom:'16px','z-index':'2147483647',display:'flex',gap:'6px','align-items':'center','pointer-events':'none',margin:'0',padding:'0',transform:'none',float:'none',width:'max-content',height:'auto','max-width':'none','max-height':'none'});doc.documentElement.append(dock);}
+  if(dock.querySelector('[data-dock-tool="'+id+'"]'))return null;
+  const host=doc.createElement('div');host.dataset.dockTool=id;
+  css(host,{display:'block',position:'relative',order:String(order),'pointer-events':'auto',margin:'0',padding:'0',transform:'none',float:'none',width:'max-content',height:'30px','max-width':'none','max-height':'none','flex-shrink':'0'});
+  const shadow=host.attachShadow({mode:'open'});
+  shadow.innerHTML='<style>:host{all:initial}*{box-sizing:border-box}button{position:relative;height:30px;margin:0;padding:0 10px;border:1px solid var(--tool);border-radius:7px;background:var(--tool);color:#fff;box-shadow:0 2px 7px #0003;font:bold 13px/28px "Microsoft JhengHei",sans-serif;white-space:nowrap;cursor:pointer}button.open{background:#fff;color:var(--tool)}button.error{background:#b91c1c;border-color:#b91c1c;color:#fff}.dot{position:absolute;right:-3px;top:-3px;width:8px;height:8px;background:#dc2626;border-radius:50%;box-shadow:0 0 0 1px #fff}.dot[hidden]{display:none}</style><button type="button"><span></span><i class="dot" hidden></i></button>';
+  const button=shadow.querySelector('button'),text=shadow.querySelector('span'),dot=shadow.querySelector('.dot');button.style.setProperty('--tool',colour);
+  if(collapse){for(const [key,value]of Object.entries({'min-width':'52px',width:'auto',height:'28px',padding:'0 6px','font-size':'12px','line-height':'26px','white-space':'nowrap','flex-shrink':'0'}))collapse.style.setProperty(key,value);}
+  dock.append(host);let opened=false,notice=false,serial=0;const phases=new Map();
+  const current=phase=>{if(!phases.has(phase))phases.set(phase,{running:false,error:false,complete:false,done:null,total:null,serial:0});return phases.get(phase);};
+  const busy=()=>[...phases.values()].some(p=>p.running);
+  function render(){const values=[...phases.values()],error=values.some(p=>p.error),active=values.filter(p=>p.running).sort((a,b)=>b.serial-a.serial)[0],complete=values.some(p=>p.complete);let suffix='';
+    if(error)text.textContent='⚠ '+label;
+    else{if(active)suffix=Number.isFinite(active.done)&&Number.isFinite(active.total)&&active.total>0?' '+active.done+'/'+active.total:' 跑中';else if(!opened&&complete)suffix=' ✓';text.textContent=label+suffix;}
+    button.classList.toggle('open',opened);button.classList.toggle('error',error);button.setAttribute('aria-pressed',String(opened));button.title=name+' v'+version+'；點一下'+(opened?'收起':'打開');button.setAttribute('aria-label',button.title);dot.hidden=!notice;
+    if(collapse){const locked=lockRunning&&busy();collapse.disabled=locked;collapse.textContent=locked?lockText:'收合';collapse.title=locked?'跑的時候不能收合；要停請按緊急停止（或停止）':'收合面板';collapse.setAttribute('aria-expanded',String(opened));collapse.setAttribute('aria-label',locked?lockText+'，不能收合':'收合面板');}
+  }
+  function open(){opened=true;for(const p of phases.values())p.complete=false;panel.style.setProperty('visibility','visible','important');panel.inert=false;panel.removeAttribute('aria-hidden');onOpen();render();}
+  function close(focus=true){if(lockRunning&&busy())return false;opened=false;panel.style.setProperty('visibility','hidden','important');panel.inert=true;panel.setAttribute('aria-hidden','true');if(focus)button.focus({preventScroll:true});render();return true;}
+  function toggle(){if(opened)close();else open();}
+  for(const type of ['pointerdown','pointerup','click','dblclick'])host.addEventListener(type,event=>event.stopPropagation());
+  button.addEventListener('click',event=>{event.preventDefault();event.stopPropagation();toggle();});
+  if(collapse)collapse.addEventListener('click',event=>{event.preventDefault();event.stopPropagation();close();});
+  close(false);
+  return {host,button,open,close,toggle,get opened(){return opened;},setNotice(value){notice=!!value;render();},
+    status(error=false,phase='main'){const p=current(phase);p.error=!!error;if(error){p.complete=false;open();}render();},
+    setBadge({phase='main',running,done,total,outcome,start=false,reset=false}={}){if(reset)phases.delete(phase);const p=current(phase);p.serial=++serial;if(typeof running==='boolean')p.running=running;if(Number.isFinite(done))p.done=Math.max(0,Math.floor(done));if(Number.isFinite(total))p.total=Math.max(0,Math.floor(total));if(start){p.error=false;p.complete=false;p.done=null;p.total=null;open();}if(outcome){p.running=false;p.complete=outcome==='complete';if(outcome!=='complete')p.complete=false;}render();},
+    geometry(){const r=panel.getBoundingClientRect();return r.width>0&&r.height>0&&[r.left,r.top,r.width,r.height].every(Number.isFinite)?r:null;}
+  };
+}
+/* END ETHAN TOOL DOCK V1 */
 
   // 必須與檔案開頭的 @version 完全相同：面板顯示的是這個常數，不是 @version。
   // v1.1.7 曾漏改這裡，導致面板顯示 1.1.5、現場無法判斷實際安裝版本。
-  const VERSION = "1.6.1";
+  const VERSION = "1.6.2";
   const SHIPPING_NOTICE = "僅限使用蝦皮店到店/711/全家/新竹物流方式結單";
   const STORE = Object.freeze({
     sent: "winlist-shopee:sent:v3",
@@ -2406,8 +2442,8 @@
   const PANEL_STYLES = `
     :host { all: initial; }
     * { box-sizing: border-box; }
-    .wl-panel {
-      position: fixed; right: 16px; bottom: 16px; z-index: 2147483647;
+    .wl-panel { visibility:hidden;
+      position: fixed; right: 16px; bottom: 56px; z-index: 2147483646;
       width: min(430px, calc(100vw - 32px)); min-width:320px;
       max-width:min(50vw, calc(100vw - 32px)); min-height:200px;
       max-height:calc(100vh - 32px); resize:both;
@@ -2474,6 +2510,8 @@
     document.body.append(host);
     const panel = shadow.querySelector(".wl-panel");
     const header = shadow.querySelector(".wl-head");
+    const dock=createEthanToolDock({id:"detail",label:"明細",name:"自動回覆明細",version:VERSION,order:30,colour:"#ee4d2d",panel,collapse:shadow.querySelector("[data-collapse]"),lockRunning:true});
+    panel.__ethanDock=dock;
     const savedPosition = GM_getValue(STORE.panelPosition, null);
     const savedSize = GM_getValue(STORE.panelSize, null);
     const sizeLimits = () => ({
@@ -2532,10 +2570,12 @@
         ? new ResizeObserver(() => {
             if (panel.classList.contains("wl-collapsed")) return;
             const rect = panel.getBoundingClientRect();
+            if(!(rect.width>0&&rect.height>0))return;
             expandedHeight = rect.height;
             clearTimeout(sizeSaveTimer);
             sizeSaveTimer = setTimeout(() => {
               if (panel.classList.contains("wl-collapsed")) return;
+              if(!dock.geometry())return;
               const size = clampSize(rect.width, rect.height);
               GM_setValue(STORE.panelSize, {
                 width: Math.round(size.width),
@@ -2567,6 +2607,7 @@
     const finishDrag = (event) => {
       if (!dragState || dragState.pointerId !== event.pointerId) return;
       const rect = panel.getBoundingClientRect();
+      if(!(rect.width>0&&rect.height>0))return;
       GM_setValue(STORE.panelPosition, {
         left: Math.round(rect.left),
         top: Math.round(rect.top),
@@ -2578,22 +2619,9 @@
     };
     header.addEventListener("pointerup", finishDrag);
     header.addEventListener("pointercancel", finishDrag);
-    shadow.querySelector("[data-collapse]").addEventListener("click", (event) => {
-      const collapsing = !panel.classList.contains("wl-collapsed");
-      if (collapsing) {
-        expandedHeight = panel.getBoundingClientRect().height;
-        panel.classList.add("wl-collapsed");
-        panel.style.height = "";
-      } else {
-        panel.classList.remove("wl-collapsed");
-        if (Number.isFinite(expandedHeight)) {
-          panel.style.height = `${Math.round(expandedHeight)}px`;
-        }
-      }
-      event.currentTarget.textContent = collapsing ? "展開" : "收合";
-    });
     return {
       host,
+      dock,
       root: shadow,
       body: shadow.querySelector(".wl-body"),
       panel,
@@ -3011,6 +3039,8 @@
   }
 
   function initPartB() {
+    if(document.querySelector("[data-winlist-shopee]"))return false;
+    const shell = createPanel("自動回覆明細");
     const savedConfig = loadConfig();
     const state = {
       queue: null,
@@ -3023,7 +3053,6 @@
       stopRequested: false,
       resendExpanded: false,
     };
-    const shell = createPanel("自動回覆明細");
     shell.body.innerHTML = `
       <div class="wl-section">
         <h3>1. 手動匯入已審核 Excel</h3>
@@ -3197,10 +3226,12 @@
       persistLogs();
     };
     const showRunStatus = (message, kind = "") => {
+      shell.dock.status(kind==="error","run");
       runStatus.className = `wl-status ${kind ? `wl-${kind}` : ""}`;
       runStatus.textContent = message;
     };
     const showImportStatus = (message, kind = "") => {
+      shell.dock.status(kind==="error","import");
       importStatus.className = `wl-status ${kind ? `wl-${kind}` : ""}`;
       importStatus.textContent = message;
     };
@@ -3551,6 +3582,7 @@
       };
 
       state.running = true;
+      shell.dock.setBadge({running:true,start:true,reset:true});
       state.stopRequested = false;
       startButton.disabled = true;
       stopButton.classList.remove("wl-hidden");
@@ -3565,6 +3597,7 @@
       try {
         for (let index = 0; index < items.length; index += 1) {
           if (state.stopRequested) throw new Error("使用者已緊急停止。");
+          shell.dock.setBadge({running:true,done:index+1,total:items.length});
           const item = items[index];
           showRunStatus(
             `處理 ${index + 1}/${items.length}：${item.account}`,
@@ -3662,11 +3695,14 @@
         const runSummary = buildRunSummary(runCounts);
         showRunStatus(runSummary.message, runSummary.kind);
         addLog("DONE", "", runSummary.message);
+        shell.dock.setBadge({outcome:runSummary.kind==="success"?"complete":"failed"});
       } catch (error) {
         showRunStatus(error.message || String(error), "warn");
         addLog("STOP", "", error.message || String(error));
+        shell.dock.setBadge({outcome:"stopped"});
       } finally {
         state.running = false;
+        shell.dock.setBadge({running:false});
         state.stopRequested = false;
         startButton.disabled = false;
         stopButton.classList.add("wl-hidden");
@@ -3901,13 +3937,14 @@
     location.hostname === "seller.shopee.tw" &&
     location.pathname.startsWith("/new-webchat/conversations")
   ) {
-    initPartB();
+    if(document.querySelector("[data-winlist-shopee]"))return;
+    try{if(initPartB()===false)return;}catch(error){const panel=document.querySelector("[data-winlist-shopee]")?.shadowRoot?.querySelector(".wl-panel");if(panel){panel.querySelector(".wl-body").textContent="初始化失敗："+(error?.message||String(error));panel.__ethanDock?.status(true);}return;}
     if (typeof GM_registerMenuCommand === "function") {
       GM_registerMenuCommand("開啟自動回覆明細", () => {
         document
           .querySelector('[data-winlist-shopee="1"]')
           ?.shadowRoot?.querySelector(".wl-panel")
-          ?.classList.remove("wl-collapsed");
+          ?.__ethanDock?.open();
       });
     }
   }

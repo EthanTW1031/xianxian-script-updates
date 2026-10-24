@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee 帳號預檢
 // @namespace    local.shopee.account-precheck
-// @version      0.4.3
+// @version      0.4.7
 // @description  搜尋帳號與封鎖旗標，不發訊息；搜尋結果沒有封鎖欄位時才點進對話看封鎖；無損分開匯出預檢通過與待處理 CSV
 // @match        https://seller.shopee.tw/new-webchat/conversations*
 // @grant        GM_getValue
@@ -18,6 +18,47 @@
 // 0.3.3 (2026-10-16): when the buyer search result has no blocked flag, open that chat to read it (Ethan chose 甲); only accept the scope search box.
 // 0.3.5 (2026-10-17): when the chat page never loads its search data, tell staff to reload the page (F5) instead of waiting; Ethan asked Claude to change it directly.
 // 0.3.6 (2026-10-17): rebuilt with the shared chat code from replay 0.1.7; precheck behaviour is the same as 0.3.5.
+// 0.4.5 (2026-10-24): rebuilt with the shared chat code from replay 0.2.5 (replay-only search checks); precheck behaviour is the same as 0.4.4.
+// 0.4.6 (2026-10-24): rebuilt with the shared chat code from replay 0.2.6; precheck behaviour is the same as 0.4.4.
+// 0.4.7 (2026-10-24): rebuilt with the shared chat code from replay 0.2.7; precheck does not use the replay message reading or the new scroll-to-latest step, and its own block-flag check (opening a chat when the search result has no blocked flag) is unchanged; precheck behaviour is the same as 0.4.4.
+
+(function(){
+/* BEGIN ETHAN TOOL DOCK V1 */
+function createEthanToolDock({id,label,name,version,order,colour,panel,collapse,lockRunning=false,lockText='發送中',onOpen=()=>{}}){
+  const doc=panel.ownerDocument;
+  let dock=doc.getElementById('ethan-tool-dock-v1');
+  const css=(node,values)=>{node.style.setProperty('all','initial','important');for(const [key,value]of Object.entries(values))node.style.setProperty(key,value,'important');};
+  if(!dock){dock=doc.createElement('div');dock.id='ethan-tool-dock-v1';css(dock,{position:'fixed',right:'16px',bottom:'16px','z-index':'2147483647',display:'flex',gap:'6px','align-items':'center','pointer-events':'none',margin:'0',padding:'0',transform:'none',float:'none',width:'max-content',height:'auto','max-width':'none','max-height':'none'});doc.documentElement.append(dock);}
+  if(dock.querySelector('[data-dock-tool="'+id+'"]'))return null;
+  const host=doc.createElement('div');host.dataset.dockTool=id;
+  css(host,{display:'block',position:'relative',order:String(order),'pointer-events':'auto',margin:'0',padding:'0',transform:'none',float:'none',width:'max-content',height:'30px','max-width':'none','max-height':'none','flex-shrink':'0'});
+  const shadow=host.attachShadow({mode:'open'});
+  shadow.innerHTML='<style>:host{all:initial}*{box-sizing:border-box}button{position:relative;height:30px;margin:0;padding:0 10px;border:1px solid var(--tool);border-radius:7px;background:var(--tool);color:#fff;box-shadow:0 2px 7px #0003;font:bold 13px/28px "Microsoft JhengHei",sans-serif;white-space:nowrap;cursor:pointer}button.open{background:#fff;color:var(--tool)}button.error{background:#b91c1c;border-color:#b91c1c;color:#fff}.dot{position:absolute;right:-3px;top:-3px;width:8px;height:8px;background:#dc2626;border-radius:50%;box-shadow:0 0 0 1px #fff}.dot[hidden]{display:none}</style><button type="button"><span></span><i class="dot" hidden></i></button>';
+  const button=shadow.querySelector('button'),text=shadow.querySelector('span'),dot=shadow.querySelector('.dot');button.style.setProperty('--tool',colour);
+  if(collapse){for(const [key,value]of Object.entries({'min-width':'52px',width:'auto',height:'28px',padding:'0 6px','font-size':'12px','line-height':'26px','white-space':'nowrap','flex-shrink':'0'}))collapse.style.setProperty(key,value);}
+  dock.append(host);let opened=false,notice=false,serial=0;const phases=new Map();
+  const current=phase=>{if(!phases.has(phase))phases.set(phase,{running:false,error:false,complete:false,done:null,total:null,serial:0});return phases.get(phase);};
+  const busy=()=>[...phases.values()].some(p=>p.running);
+  function render(){const values=[...phases.values()],error=values.some(p=>p.error),active=values.filter(p=>p.running).sort((a,b)=>b.serial-a.serial)[0],complete=values.some(p=>p.complete);let suffix='';
+    if(error)text.textContent='⚠ '+label;
+    else{if(active)suffix=Number.isFinite(active.done)&&Number.isFinite(active.total)&&active.total>0?' '+active.done+'/'+active.total:' 跑中';else if(!opened&&complete)suffix=' ✓';text.textContent=label+suffix;}
+    button.classList.toggle('open',opened);button.classList.toggle('error',error);button.setAttribute('aria-pressed',String(opened));button.title=name+' v'+version+'；點一下'+(opened?'收起':'打開');button.setAttribute('aria-label',button.title);dot.hidden=!notice;
+    if(collapse){const locked=lockRunning&&busy();collapse.disabled=locked;collapse.textContent=locked?lockText:'收合';collapse.title=locked?'跑的時候不能收合；要停請按緊急停止（或停止）':'收合面板';collapse.setAttribute('aria-expanded',String(opened));collapse.setAttribute('aria-label',locked?lockText+'，不能收合':'收合面板');}
+  }
+  function open(){opened=true;for(const p of phases.values())p.complete=false;panel.style.setProperty('visibility','visible','important');panel.inert=false;panel.removeAttribute('aria-hidden');onOpen();render();}
+  function close(focus=true){if(lockRunning&&busy())return false;opened=false;panel.style.setProperty('visibility','hidden','important');panel.inert=true;panel.setAttribute('aria-hidden','true');if(focus)button.focus({preventScroll:true});render();return true;}
+  function toggle(){if(opened)close();else open();}
+  for(const type of ['pointerdown','pointerup','click','dblclick'])host.addEventListener(type,event=>event.stopPropagation());
+  button.addEventListener('click',event=>{event.preventDefault();event.stopPropagation();toggle();});
+  if(collapse)collapse.addEventListener('click',event=>{event.preventDefault();event.stopPropagation();close();});
+  close(false);
+  return {host,button,open,close,toggle,get opened(){return opened;},setNotice(value){notice=!!value;render();},
+    status(error=false,phase='main'){const p=current(phase);p.error=!!error;if(error){p.complete=false;open();}render();},
+    setBadge({phase='main',running,done,total,outcome,start=false,reset=false}={}){if(reset)phases.delete(phase);const p=current(phase);p.serial=++serial;if(typeof running==='boolean')p.running=running;if(Number.isFinite(done))p.done=Math.max(0,Math.floor(done));if(Number.isFinite(total))p.total=Math.max(0,Math.floor(total));if(start){p.error=false;p.complete=false;p.done=null;p.total=null;open();}if(outcome){p.running=false;p.complete=outcome==='complete';if(outcome!=='complete')p.complete=false;}render();},
+    geometry(){const r=panel.getBoundingClientRect();return r.width>0&&r.height>0&&[r.left,r.top,r.width,r.height].every(Number.isFinite)?r:null;}
+  };
+}
+/* END ETHAN TOOL DOCK V1 */
 
 (() => {
   var __create = Object.create;
@@ -50,9 +91,9 @@
     mod
   ));
 
-  // ../../../shopee_未結鏢客人/新客限購_候選_v1.3_20261022/chat/src/util.cjs
+  // chat/src/util.cjs
   var require_util = __commonJS({
-    "../../../shopee_未結鏢客人/新客限購_候選_v1.3_20261022/chat/src/util.cjs"(exports, module) {
+    "chat/src/util.cjs"(exports, module) {
       "use strict";
       var TaskError = class extends Error {
         constructor(code, message) {
@@ -91,13 +132,15 @@
         return [...new Uint8Array(hash)].map((b) => b.toString(16).padStart(2, "0")).join("");
       }
       var safeMessage = (error) => error instanceof TaskError ? error.message : "讀取失敗，已停止；請保留原檔並請人協助。";
-      module.exports = { TaskError, problem, norm, ordinal, decimal, safeUid, compareIds, clone, canonical, sha256, safeMessage };
+      var REPLAY_SEARCH_TEXT_TYPE = "text";
+      var REPLAY_SEARCH_EXCLUDED_TYPES = Object.freeze({ image_with_text: "圖文訊息" });
+      module.exports = { TaskError, problem, norm, ordinal, decimal, safeUid, compareIds, clone, canonical, sha256, safeMessage, REPLAY_SEARCH_TEXT_TYPE, REPLAY_SEARCH_EXCLUDED_TYPES };
     }
   });
 
-  // ../../../shopee_未結鏢客人/新客限購_候選_v1.3_20261022/chat/src/precheck-core.cjs
+  // chat/src/precheck-core.cjs
   var require_precheck_core = __commonJS({
-    "../../../shopee_未結鏢客人/新客限購_候選_v1.3_20261022/chat/src/precheck-core.cjs"(exports, module) {
+    "chat/src/precheck-core.cjs"(exports, module) {
       "use strict";
       var { problem, norm, clone } = require_util();
       var HEADERS = Object.freeze(["擷取時間", "直播Session", "限定時段序號", "留言ID", "買家UID", "買家帳號", "原始留言", "正規化留言", "商品代號", "品名", "規格尺寸", "數量", "價格", "狀態", "待確認", "來源", "喊單則數", "彙總件數"]);
@@ -306,9 +349,9 @@
     }
   });
 
-  // ../../../shopee_未結鏢客人/新客限購_候選_v1.3_20261022/chat/src/precheck-storage.cjs
+  // chat/src/precheck-storage.cjs
   var require_precheck_storage = __commonJS({
-    "../../../shopee_未結鏢客人/新客限購_候選_v1.3_20261022/chat/src/precheck-storage.cjs"(exports, module) {
+    "chat/src/precheck-storage.cjs"(exports, module) {
       "use strict";
       var { problem, clone, canonical, sha256 } = require_util();
       var core2 = require_precheck_core();
@@ -400,14 +443,15 @@
     }
   });
 
-  // ../../../shopee_未結鏢客人/新客限購_候選_v1.3_20261022/chat/src/chat-runtime.cjs
+  // chat/src/chat-runtime.cjs
   var require_chat_runtime = __commonJS({
-    "../../../shopee_未結鏢客人/新客限購_候選_v1.3_20261022/chat/src/chat-runtime.cjs"(exports, module) {
+    "chat/src/chat-runtime.cjs"(exports, module) {
       "use strict";
-      var { problem, norm, decimal, safeUid, compareIds, canonical } = require_util();
+      var { problem, norm, decimal, safeUid, compareIds, canonical, REPLAY_SEARCH_TEXT_TYPE, REPLAY_SEARCH_EXCLUDED_TYPES } = require_util();
       var LOCK_NAME = "shopee-settlement-notice:send";
       var PANELS = "[data-account-precheck],[data-settlement-notice],[data-winlist-shopee],[data-replay-add-order]";
       var LIMITS = Object.freeze({ root: 3e4, query: 15e3, page: 15e3, conversation: 1e4, scope: 2e4, poll: 200 });
+      var MAX_LATEST_ROUNDS = 30;
       function visible(el) {
         if (!el) return false;
         const style = getComputedStyle(el), r = el.getBoundingClientRect();
@@ -517,7 +561,7 @@
             if (typeof r.to_name !== "string" || !r.to_name.trim()) throw problem("DATA", "搜尋結果帳號欄位格式異常，已停止。");
             return { id: typeof r.id === "string" ? r.id : null, to_name: r.to_name, to_id: typeof r.to_id === "number" ? r.to_id : null, is_blocked: typeof r.is_blocked === "boolean" ? r.is_blocked : null };
           }
-          return { message_id: r.message_id, message_nano_time: r.message_nano_time, message_time: r.message_time, text: r.text, to_id: r.to_id, to_name: r.to_name, conversation_id: r.conversation_id };
+          return { message_id: r.message_id, message_nano_time: r.message_nano_time, message_time: r.message_time, message_type: r.message_type, text: r.text, to_id: r.to_id, to_name: r.to_name, conversation_id: r.conversation_id };
         });
       }
       function classifyUser(results, account) {
@@ -651,25 +695,36 @@
         }
         return null;
       }
-      function validateSearchMessages(rows) {
+      function validateSearchMessages(rows, { boundarySize = 0 } = {}) {
         let previous = null;
         const seen = /* @__PURE__ */ new Set();
-        for (const r of rows) {
-          if (!decimal(r.message_id) || !decimal(r.conversation_id) || !decimal(r.message_nano_time) || !safeUid(r.to_id) || typeof r.to_name !== "string" || typeof r.text !== "string" || !Number.isSafeInteger(r.message_time) || BigInt(r.message_nano_time) / 1000000000n !== BigInt(r.message_time) || !r.text.normalize("NFKC").includes("回放加單")) throw problem("SEARCH_DATA", "回放搜尋資料與探查條件不同，已停止，不能匯出叫貨檔。");
-          if (seen.has(r.message_id)) throw problem("SEARCH_DATA", "回放搜尋出現重複訊息，已停止。");
+        rows.forEach((r, index) => {
+          if (!decimal(r.message_id) || !decimal(r.conversation_id) || !decimal(r.message_nano_time) || !safeUid(r.to_id) || typeof r.to_name !== "string" || typeof r.text !== "string" || !Number.isSafeInteger(r.message_time) || BigInt(r.message_nano_time) / 1000000000n !== BigInt(r.message_time)) throw problem("SEARCH_DATA", "回放搜尋資料與探查條件不同，已停止，不能匯出叫貨檔。");
+          if (typeof r.message_type !== "string" || !r.message_type) throw problem("SEARCH_DATA", "回放搜尋結果沒有訊息類型，和探查時不同，已停止，不能匯出叫貨檔。");
+          if (r.message_type === REPLAY_SEARCH_TEXT_TYPE) {
+            if (!r.text.normalize("NFKC").includes("回放加單")) throw problem("SEARCH_DATA", "回放搜尋資料與探查條件不同，已停止，不能匯出叫貨檔。");
+          } else if (!Object.hasOwn(REPLAY_SEARCH_EXCLUDED_TYPES, r.message_type)) throw problem("SEARCH_DATA", `回放搜尋出現沒見過的訊息類型（${JSON.stringify(r.message_type.slice(0, 40))}），已停止，不能匯出叫貨檔；請把這段紅字告訴 Claude。`);
+          if (seen.has(r.message_id)) {
+            if (!(boundarySize > 0 && index % boundarySize === 0 && previous && canonical(previous) === canonical(r))) throw problem("SEARCH_DATA", "回放搜尋出現重複訊息，已停止。");
+          }
           seen.add(r.message_id);
           if (previous && (BigInt(r.message_nano_time) > BigInt(previous.message_nano_time) || r.message_nano_time === previous.message_nano_time && compareIds(r.message_id, previous.message_id) > 0)) throw problem("SEARCH_DATA", "回放搜尋排序與預期不同，已停止。");
           previous = r;
-        }
+        });
         return rows;
       }
-      function conversationFrame(store, id) {
+      function uniqueSearchMessages(rows) {
+        const seen = /* @__PURE__ */ new Set();
+        return rows.filter((r) => !seen.has(r.message_id) && seen.add(r.message_id));
+      }
+      function conversationFrame(store, id, { allowBehind = false } = {}) {
         const s = store.getState(), c = s.entityReducer?.conversations?.[id], rel = s.messageReducer?.messagesRelatedMap?.[id];
         if (s.conversationReducer?.currentConversationId !== id) return null;
         if (!object(c) || !object(rel)) return null;
         if (c.id !== void 0 && c.id !== id) throw problem("DATA", "對話編號資料矛盾，已停止。");
         if (!safeUid(c.to_id) || typeof c.to_name !== "string" || typeof c.is_blocked !== "boolean" || !Array.isArray(rel.all) || typeof rel.hasMoreOlderMessage !== "boolean" || typeof rel.hasMoreLatestMessage !== "boolean") throw problem("DATA", "對話或訊息清單格式異常，已停止。");
-        if (rel.hasMoreLatestMessage && !(decimal(c.latest_message_id) && rel.all[0] === c.latest_message_id)) throw problem("LATEST_NOT_LOADED", "這個對話尚未讀到最新一端，已停止；請人工確認後重跑。");
+        const behind = rel.hasMoreLatestMessage && !(decimal(c.latest_message_id) && rel.all[0] === c.latest_message_id);
+        if (behind && !allowBehind) throw problem("LATEST_NOT_LOADED", "這個對話尚未讀到最新一端，已停止；請人工確認後重跑。");
         const seen = /* @__PURE__ */ new Set(), precisions = /* @__PURE__ */ new Set(), messages = rel.all.map((mid) => {
           if (!decimal(mid) || seen.has(mid)) throw problem("DATA", "對話訊息編號重複或格式不正確，已停止。");
           seen.add(mid);
@@ -683,7 +738,7 @@
         });
         if (precisions.size > 1) throw problem("DATA", "同一個對話的訊息時間格式不一致（有的有奈秒、有的沒有），已停止。");
         for (let i = 1; i < messages.length; i++) if (BigInt(messages[i].nano) > BigInt(messages[i - 1].nano) || messages[i].nano === messages[i - 1].nano && compareIds(messages[i].id, messages[i - 1].id) > 0) throw problem("DATA", "對話訊息排序與預期不同，已停止。");
-        return { conversation: { id, to_name: c.to_name, to_id: c.to_id, is_blocked: c.is_blocked }, messages, hasMoreOlder: rel.hasMoreOlderMessage, precision: [...precisions][0] ?? null };
+        return { conversation: { id, to_name: c.to_name, to_id: c.to_id, is_blocked: c.is_blocked }, messages, hasMoreOlder: rel.hasMoreOlderMessage, behind, precision: [...precisions][0] ?? null };
       }
       function assertCandidateTitlesRead(value, candidate) {
         if (value.conversation.is_blocked) return;
@@ -788,7 +843,8 @@
         }
         async function collectSearch(startNs) {
           const q = await query("回放加單", "message", "message");
-          let rows = validateSearchMessages(q.results), filter = q.filter;
+          const pageSize = () => currentStore().getState()?.searchReducer?.pagination?.message?.pageSize, first = pageSize(), fixed = Number.isSafeInteger(first) && first > 0 ? first : 0, whole = (length, hasMore) => hasMore === false || length % fixed === 0;
+          let proven = fixed > 0 && whole(q.results.length, q.hasMore), rows = validateSearchMessages(q.results), filter = q.filter;
           searchScroller = null;
           while (q.hasMore !== false && !(rows.length && BigInt(rows.at(-1).message_nano_time) < startNs)) {
             safe(stop);
@@ -800,7 +856,7 @@
               if (!searchScroller) throw problem("UI_BINDING", "無法確認訊息搜尋清單的捲動區，已停止。");
             }
             if (!document.contains(searchScroller)) throw problem("UI_BINDING", "搜尋清單被替換，已停止。");
-            const before = rows.map((r) => canonical(r));
+            const before = rows.map((r) => canonical(r)), known = uniqueSearchMessages(rows).length;
             searchScroller.scrollTop = searchScroller.scrollHeight;
             searchScroller.dispatchEvent(new Event("scroll", { bubbles: true }));
             const next = await wait(() => {
@@ -808,16 +864,20 @@
               if (f.keyword !== "回放加單" || f.filter !== filter || inputElement().value !== "回放加單") throw problem("SEARCH_UNRELIABLE", "搜尋條件中途變動，已停止。");
               if (!f.branch) return null;
               if (f.branch.status !== "succeed") return null;
-              const projected = validateSearchMessages(projectResults(f.branch.results, "message"));
+              if (fixed && pageSize() !== fixed) throw problem("SEARCH_DATA", `搜尋的分頁大小中途改變（${fixed} → ${String(pageSize()).slice(0, 20)}），已停止，不能匯出叫貨檔。`);
+              const ok = proven && whole(f.branch.results.length, f.branch.hasMore), projected = validateSearchMessages(projectResults(f.branch.results, "message"), { boundarySize: ok ? fixed : 0 });
               if (projected.length < before.length || before.some((v, i) => canonical(projected[i]) !== v)) throw problem("SEARCH_DATA", "搜尋結果前面的部分被改掉，已停止。");
-              if (projected.length > before.length || f.branch.hasMore === false) return { results: projected, hasMore: f.branch.hasMore };
+              if (projected.length > before.length && f.branch.hasMore !== false && uniqueSearchMessages(projected).length <= known) throw problem("SEARCH_DATA", "翻頁後沒有讀到新的搜尋結果（頁面只把讀過的訊息又給一次），已停止，不能匯出叫貨檔。");
+              if (projected.length > before.length || f.branch.hasMore === false) return { results: projected, hasMore: f.branch.hasMore, whole: ok };
               return null;
             }, timing.page, stop);
+            proven = next.whole;
             rows = next.results;
             q.hasMore = next.hasMore;
             onStatus(`已讀 ${rows.length} 筆搜尋結果`);
           }
-          return rows;
+          const unique = uniqueSearchMessages(rows);
+          return { rows: unique, boundaryRepeats: rows.length - unique.length, loaded: rows.length };
         }
         async function openConversation(candidate) {
           if (!allowConversation) throw problem("FORBIDDEN", "帳號預檢不開對話。");
@@ -832,34 +892,61 @@
           });
           if (!nodes.length) throw problem("UI_BINDING", "買家結果的畫面元素無法綁定對話，已停止。");
           activate(nodes[0]);
-          const value = await wait(() => conversationFrame(currentStore(), candidate.conversation_id), timing.conversation, stop, "BUYER_BINDING", "沒有確認進入候選對話，已停止。");
+          const value = await wait(() => conversationFrame(currentStore(), candidate.conversation_id, { allowBehind: true }), timing.conversation, stop, "BUYER_BINDING", "沒有確認進入候選對話，已停止。");
           if (value.conversation.to_name !== candidate.to_name || value.conversation.to_id !== candidate.to_id) throw problem("BUYER_BINDING", "進入的買家對話不相符，已停止。");
           return value;
+        }
+        function messageScroller(candidate, frame) {
+          const ids = new Set(frame.messages.map((m) => m.id));
+          const nodes = [...document.querySelectorAll('[data-cy="webchat-message-receive"],[data-cy="webchat-message-send"]')].filter((e) => visible(e) && ownEntityInProps(e, (v) => v.conversation_id === candidate.conversation_id && decimal(v.id) && ids.has(v.id)));
+          const found = nodes.map(scrollParent).find(Boolean);
+          if (!found) throw problem("UI_BINDING", "無法確認目標對話的訊息捲動區，已停止。");
+          return found;
         }
         async function readConversation(candidate, startNs) {
           let frame = await openConversation(candidate);
           if (frame.conversation.is_blocked) return frame;
           const collected = /* @__PURE__ */ new Map();
           let scroller = null, precision = null;
-          while (true) {
-            safe(stop);
-            if (frame.precision) {
-              if (precision && precision !== frame.precision) throw problem("DATA", "同一個對話往上讀時，訊息時間格式變了（有的有奈秒、有的沒有），已停止。");
-              precision = frame.precision;
+          const collect = (f) => {
+            if (f.precision) {
+              if (precision && precision !== f.precision) throw problem("DATA", "同一個對話往上讀時，訊息時間格式變了（有的有奈秒、有的沒有），已停止。");
+              precision = f.precision;
             }
-            for (const m of frame.messages) {
+            for (const m of f.messages) {
               const old = collected.get(m.id);
               if (old && canonical(old) !== canonical(m)) throw problem("DATA", "已讀的訊息內容或時間被改掉，已停止。");
               collected.set(m.id, m);
             }
+          };
+          for (let round = 0; frame.behind; round++) {
+            safe(stop);
+            collect(frame);
+            if (round >= MAX_LATEST_ROUNDS) throw problem("LATEST_NOT_LOADED", `這個對話往下捲了 ${MAX_LATEST_ROUNDS} 次還沒讀到最新一端，已停止；請人工打開這位的對話捲到最底後重跑。`);
+            if (!scroller) scroller = messageScroller(candidate, frame);
+            if (!document.contains(scroller)) throw problem("UI_BINDING", "訊息捲動區被替換，已停止。");
+            const known = new Set(collected.keys()), bottom = () => Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+            if (bottom() > 0 && scroller.scrollTop >= bottom() - 1) {
+              scroller.scrollTop = Math.max(0, bottom() - 200);
+              scroller.dispatchEvent(new Event("scroll", { bubbles: true }));
+              await sleep(400, stop);
+            }
+            scroller.scrollTop = scroller.scrollHeight;
+            scroller.dispatchEvent(new Event("scroll", { bubbles: true }));
+            frame = await wait(() => {
+              const f = conversationFrame(currentStore(), candidate.conversation_id, { allowBehind: true });
+              if (!f) return null;
+              if (f.conversation.to_name !== candidate.to_name || f.conversation.to_id !== candidate.to_id) throw problem("BUYER_BINDING", "對話身分中途變動，已停止。");
+              return !f.behind || f.messages.some((m) => !known.has(m.id)) ? f : null;
+            }, timing.page, stop, "LATEST_NOT_LOADED", "這個對話往下捲到底還是尚未讀到最新一端，已停止；請人工打開這位的對話捲到最底後重跑。");
+            onStatus(`往下讀到最新一則：已讀此對話 ${collected.size} 則訊息`);
+          }
+          while (true) {
+            safe(stop);
+            collect(frame);
             const oldest = frame.messages.at(-1);
             if (frame.hasMoreOlder === false || oldest && BigInt(oldest.nano) < startNs) break;
-            if (!scroller) {
-              const ids = new Set(frame.messages.map((m) => m.id));
-              const nodes = [...document.querySelectorAll('[data-cy="webchat-message-receive"],[data-cy="webchat-message-send"]')].filter((e) => visible(e) && ownEntityInProps(e, (v) => v.conversation_id === candidate.conversation_id && decimal(v.id) && ids.has(v.id)));
-              scroller = nodes.map(scrollParent).find(Boolean);
-              if (!scroller) throw problem("UI_BINDING", "無法確認目標對話的訊息捲動區，已停止。");
-            }
+            if (!scroller) scroller = messageScroller(candidate, frame);
             if (!document.contains(scroller)) throw problem("UI_BINDING", "訊息捲動區被替換，已停止。");
             const known = new Set(collected.keys());
             if (scroller.scrollTop === 0 && scroller.scrollHeight > scroller.clientHeight) {
@@ -889,13 +976,13 @@
         }
         return { ready, query, collectSearch, readConversation, cleanup, delay: (ms) => sleep(ms, stop), safe: () => safe(stop) };
       }
-      module.exports = { LOCK_NAME, LIMITS, PANELS, visible, safe, withLock, sleep, wait, inputElement, nativeSearchValue, activate, findStore, rootStatus, searchFrame, projectResults, classifyUser, ensureScope, validateSearchMessages, conversationFrame, assertCandidateTitlesRead, createChatRuntime };
+      module.exports = { LOCK_NAME, LIMITS, PANELS, visible, safe, withLock, sleep, wait, inputElement, nativeSearchValue, activate, findStore, rootStatus, searchFrame, projectResults, classifyUser, ensureScope, validateSearchMessages, uniqueSearchMessages, conversationFrame, assertCandidateTitlesRead, createChatRuntime };
     }
   });
 
-  // ../../../shopee_未結鏢客人/新客限購_候選_v1.3_20261022/chat/src/precheck-block-check.cjs
+  // chat/src/precheck-block-check.cjs
   var require_precheck_block_check = __commonJS({
-    "../../../shopee_未結鏢客人/新客限購_候選_v1.3_20261022/chat/src/precheck-block-check.cjs"(exports, module) {
+    "chat/src/precheck-block-check.cjs"(exports, module) {
       "use strict";
       var chat2 = require_chat_runtime();
       var { problem, norm, decimal, safeUid } = require_util();
@@ -965,12 +1052,12 @@
     }
   });
 
-  // ../../../shopee_未結鏢客人/新客限購_候選_v1.3_20261022/chat/src/panel.cjs
+  // chat/src/panel.cjs
   var require_panel = __commonJS({
-    "../../../shopee_未結鏢客人/新客限購_候選_v1.3_20261022/chat/src/panel.cjs"(exports, module) {
+    "chat/src/panel.cjs"(exports, module) {
       "use strict";
       var { safeMessage } = require_util();
-      var BASE_CSS = `:host{all:initial;font:14px/1.5 "Microsoft JhengHei",sans-serif;color:#26354b}*{box-sizing:border-box}.panel{position:fixed;width:360px;max-width:calc(100vw - 24px);max-height:78vh;background:#fff;border:1px solid #bac7d8;border-radius:10px;box-shadow:0 6px 28px #0003;z-index:2147483646;overflow:hidden}header{display:flex;justify-content:space-between;align-items:center;padding:10px 12px;cursor:grab;touch-action:none;color:#fff}header button{background:#ffffff22;color:#fff;border:0}.body{padding:12px;max-height:calc(78vh - 44px);overflow:auto}.closed .body,.hidden{display:none}label{display:block;margin:7px 0}textarea,input,select,button{font:inherit}textarea,input:not([type=checkbox]),select{width:100%;padding:6px;border:1px solid #aebccd;border-radius:5px}textarea{min-height:85px;resize:vertical}button{padding:6px 9px;border:1px solid #b6c4d6;border-radius:5px;background:#f5f8fc;cursor:pointer}button:disabled{opacity:.5;cursor:default}.actions{display:flex;gap:6px;flex-wrap:wrap;margin:10px 0}.primary{background:#176e63;color:#fff}.danger{background:#b43030;color:white}.status,.mini,pre{white-space:pre-wrap;overflow-wrap:anywhere}.mini{font-size:12px;color:#596b81}.error{color:#aa2525}pre{max-height:145px;overflow:auto;background:#eef4fa;padding:7px;margin:7px 0}.check{display:flex;gap:7px;align-items:start}.stop{position:sticky;bottom:0;width:100%}`;
+      var BASE_CSS = `:host{all:initial;font:14px/1.5 "Microsoft JhengHei",sans-serif;color:#26354b}*{box-sizing:border-box}.panel{position:fixed;width:360px;max-width:calc(100vw - 24px);max-height:78vh;background:#fff;border:1px solid #bac7d8;border-radius:10px;box-shadow:0 6px 28px #0003;z-index:2147483646;visibility:hidden;overflow:hidden}header{display:flex;justify-content:space-between;align-items:center;padding:10px 12px;cursor:grab;touch-action:none;color:#fff}header button{background:#ffffff22;color:#fff;border:0}.body{padding:12px;max-height:calc(78vh - 44px);overflow:auto}.closed .body,.hidden{display:none}label{display:block;margin:7px 0}textarea,input,select,button{font:inherit}textarea,input:not([type=checkbox]),select{width:100%;padding:6px;border:1px solid #aebccd;border-radius:5px}textarea{min-height:85px;resize:vertical}button{padding:6px 9px;border:1px solid #b6c4d6;border-radius:5px;background:#f5f8fc;cursor:pointer}button:disabled{opacity:.5;cursor:default}.actions{display:flex;gap:6px;flex-wrap:wrap;margin:10px 0}.primary{background:#176e63;color:#fff}.danger{background:#b43030;color:white}.status,.mini,pre{white-space:pre-wrap;overflow-wrap:anywhere}.mini{font-size:12px;color:#596b81}.error{color:#aa2525}pre{max-height:145px;overflow:auto;background:#eef4fa;padding:7px;margin:7px 0}.check{display:flex;gap:7px;align-items:start}.stop{position:sticky;bottom:0;width:100%}`;
       function mountPanel({ attribute, title, html, colour = "#176e63", position = { left: 18, top: 18 }, gm, positionKey }) {
         if (document.querySelector(`[${attribute}]`)) return null;
         const host = document.createElement("div");
@@ -982,19 +1069,20 @@
         let drag = null;
         function place(left, top) {
           const r = panel.getBoundingClientRect();
+          if (!(r.width > 0 && r.height > 0)) return;
           panel.style.left = `${Math.min(Math.max(8, left), Math.max(8, innerWidth - r.width - 8))}px`;
           panel.style.top = `${Math.min(Math.max(8, top), Math.max(8, innerHeight - Math.min(r.height, 80) - 8))}px`;
         }
         const save = () => {
           const r = panel.getBoundingClientRect();
+          if (!(r.width > 0 && r.height > 0)) return;
           Promise.resolve(gm.set(positionKey, { left: Math.round(r.left), top: Math.round(r.top) })).catch(() => {
           });
         };
         place(position.left, position.top);
-        Promise.resolve(gm.get(positionKey, null)).then((p) => {
+        Promise.resolve().then(() => gm.get(positionKey, null)).then((p) => {
           if (Number.isFinite(p?.left) && Number.isFinite(p?.top)) place(p.left, p.top);
-        }).catch(() => {
-        });
+        }).catch((error) => show("面板位置讀取失敗：" + safeMessage(error), true));
         function end(e) {
           if (!drag || e?.pointerId != null && e.pointerId !== drag.id) return;
           const id = drag.id;
@@ -1018,11 +1106,10 @@
           const r = panel.getBoundingClientRect();
           place(r.left, r.top);
         });
-        $("[data-collapse]").addEventListener("click", () => {
-          panel.classList.toggle("closed");
-          $("[data-collapse]").textContent = panel.classList.contains("closed") ? "展開" : "收合";
-        });
+        const replay = attribute === "data-replay-add-order";
+        const dock = createEthanToolDock({ id: replay ? "replay" : "precheck", label: replay ? "回放" : "預檢", name: replay ? "回放加單" : "帳號預檢", version: replay ? "0.2.7" : "0.4.7", order: replay ? 20 : 10, colour, panel, collapse: $("[data-collapse]") });
         const show = (message, error = false) => {
+          dock.status(error, "phase1");
           const target = $("[data-status]");
           if (target) {
             target.textContent = message;
@@ -1046,15 +1133,14 @@
         }
         if (gm.menu) {
           gm.menu(`開啟${title}`, () => {
-            panel.classList.remove("closed");
-            $("[data-collapse]").textContent = "收合";
+            dock.open();
           });
           gm.menu(`重設${title}位置`, () => {
             place(position.left, position.top);
             save();
           });
         }
-        return { host, root, $, panel, show, log, download, fail: (error) => show(safeMessage(error), true) };
+        return { host, root, $, panel, dock, setBadge: (data) => dock.setBadge(data), show, log, download, fail: (error) => show(safeMessage(error), true) };
       }
       function gmAdapter() {
         return { get: (key, fallback) => typeof GM_getValue === "function" ? GM_getValue(key, fallback) : fallback, set: (key, value) => {
@@ -1066,9 +1152,9 @@
     }
   });
 
-  // ../../../shopee_未結鏢客人/新客限購_候選_v1.3_20261022/chat/src/precheck-ui.cjs
+  // chat/src/precheck-ui.cjs
   var require_precheck_ui = __commonJS({
-    "../../../shopee_未結鏢客人/新客限購_候選_v1.3_20261022/chat/src/precheck-ui.cjs"(exports, module) {
+    "chat/src/precheck-ui.cjs"(exports, module) {
       "use strict";
       var core2 = require_precheck_core();
       var storage2 = require_precheck_storage();
@@ -1076,7 +1162,7 @@
       var blockCheck = require_precheck_block_check();
       var { problem, safeMessage } = require_util();
       var { mountPanel, gmAdapter } = require_panel();
-      var VERSION = "0.4.3";
+      var VERSION = "0.4.7";
       async function initPrecheck(onFormalSuccess = async () => {
       }) {
         const gm = gmAdapter(), ui2 = mountPanel({ attribute: "data-account-precheck", title: `帳號預檢 v${VERSION}（只查、不發）`, position: { left: Math.min(Math.round(innerWidth * 0.28), Math.max(18, innerWidth - 380)), top: 80 }, gm, positionKey: storage2.STORE.panelPosition, html: `
@@ -1104,6 +1190,8 @@
           if (state.queue) {
             const value = await repo.read();
             state.records = value.records;
+            const s = core2.summary(state.queue, state.records);
+            ui2.dock.setNotice(s.unchecked > 0);
             $("[data-summary]").textContent = [core2.summaryText(core2.summary(state.queue, state.records)), core2.streakWarning(state.queue, state.records)].filter(Boolean).join("\n");
             const selection = $("[data-preview-select]").value;
             $("[data-preview-select]").replaceChildren(...state.queue.items.map((i) => {
@@ -1235,11 +1323,13 @@
           if (state.running || state.busy || !state.queue?.items.length) return;
           state.running = true;
           state.stop = false;
+          ui2.setBadge({ phase: "phase1", running: true, start: true, reset: true });
           controls();
           try {
             await chat2.withLock(async () => {
               const { records } = await checkCurrent(), dry = $("[data-dry]").checked, all = core2.runnableItems(state.queue, records), items = dry ? all.slice(0, 3) : all;
               if (!items.length) {
+                ui2.setBadge({ phase: "phase1", outcome: dry ? "complete" : "waiting" });
                 ui2.show("沒有待查者；搜尋未確認需手動重查。");
                 if (!dry && !state.stop && !core2.summary(state.queue, records).unchecked) ((proof) => queueMicrotask(() => onFormalSuccess(proof).catch(ui2.fail)))({ batchId: state.queue.batchId, sourceHash: state.entry.hash });
                 return;
@@ -1248,6 +1338,7 @@
               await runtime.ready(false);
               for (let index = 0; index < items.length; index++) {
                 runtime.safe();
+                ui2.setBadge({ phase: "phase1", running: true, done: index + 1, total: items.length });
                 const current = await checkCurrent(), item = items[index];
                 if (!core2.RETRYABLE.includes(core2.itemState(state.queue, current.records, item))) continue;
                 ui2.show(`${dry ? "演練" : "檢查"} ${index + 1}／${items.length}：${item.account}`);
@@ -1275,6 +1366,7 @@
                 if (index < items.length - 1) await runtime.delay(dry ? 500 : 2e3 + Math.floor(Math.random() * 2001));
               }
               await runtime.cleanup();
+              ui2.setBadge({ phase: "phase1", outcome: dry ? "complete" : "waiting" });
               ui2.show(dry ? "演練完成，沒有寫檢查結果；請核對後取消演練再正式查。" : "本次檢查完成，請核對摘要並匯出。");
               if (!dry && !state.stop) ((proof) => queueMicrotask(() => onFormalSuccess(proof).catch(ui2.fail)))({ batchId: state.queue.batchId, sourceHash: state.entry.hash });
             });
@@ -1282,6 +1374,7 @@
             ui2.fail(error);
           } finally {
             state.running = false;
+            ui2.setBadge({ phase: "phase1", running: false });
             await render().catch(ui2.fail);
           }
         });
@@ -1291,6 +1384,7 @@
           state.blacklist = core2.parseBlacklist(await repo.get(storage2.STORE.blacklist, []));
           $("[data-blacklist]").value = state.blacklist.join("\n");
           const last = (await repo.read()).files.last;
+          ui2.dock.setNotice(last?.progressVersion === 2 && Number.isFinite(last.completed) && Number.isFinite(last.total) && last.completed < last.total);
           if (last) $("[data-resume]").textContent = last.progressVersion === 2 ? `上次 ${last.name} 已查 ${last.completed}／${last.total} 位。重新選同一份原檔會接著查。` : `上次原檔：${last.name}。這是舊版進度，重新匯入後由本版核對待查者。`;
           state.booted = true;
           ui2.show("紀錄準備好了；本版只搜尋，不發訊息、不開對話。");
@@ -1306,9 +1400,9 @@
     }
   });
 
-  // ../../../shopee_未結鏢客人/新客限購_候選_v1.3_20261022/chat/src/buyer-types.cjs
+  // chat/src/buyer-types.cjs
   var require_buyer_types = __commonJS({
-    "../../../shopee_未結鏢客人/新客限購_候選_v1.3_20261022/chat/src/buyer-types.cjs"(exports, module) {
+    "chat/src/buyer-types.cjs"(exports, module) {
       "use strict";
       var { splitCsv, validateBuyerAccount } = require_precheck_core();
       var TYPES = Object.freeze({ OLD: "old", NEW: "new", PENDING: "pending", UNCLAIMED: "unclaimed" });
@@ -1383,9 +1477,9 @@
     }
   });
 
-  // ../../../shopee_未結鏢客人/新客限購_候選_v1.3_20261022/chat/src/buyer-orders.cjs
+  // chat/src/buyer-orders.cjs
   var require_buyer_orders = __commonJS({
-    "../../../shopee_未結鏢客人/新客限購_候選_v1.3_20261022/chat/src/buyer-orders.cjs"(exports, module) {
+    "chat/src/buyer-orders.cjs"(exports, module) {
       "use strict";
       var { fail, id, cardSummary, classify } = require_buyer_types();
       var PATHS = { index: "/api/v3/order/search_order_list_index", cards: "/api/v3/order/get_order_list_card_list", detail: "/api/v3/order/get_one_order" };
@@ -1567,9 +1661,9 @@
     }
   });
 
-  // ../../../shopee_未結鏢客人/新客限購_候選_v1.3_20261022/chat/src/buyer-query-guard.cjs
+  // chat/src/buyer-query-guard.cjs
   var require_buyer_query_guard = __commonJS({
-    "../../../shopee_未結鏢客人/新客限購_候選_v1.3_20261022/chat/src/buyer-query-guard.cjs"(exports, module) {
+    "chat/src/buyer-query-guard.cjs"(exports, module) {
       "use strict";
       var SHARED_COOLDOWN_KEY = "shopee-buyer-orders:shared-cooldown:v1";
       var GM_COOLDOWN_KEY = "buyer-orders:cooldown:v1";
@@ -1630,9 +1724,9 @@
     }
   });
 
-  // ../../../shopee_未結鏢客人/新客限購_候選_v1.3_20261022/chat/src/buyer-phase.cjs
+  // chat/src/buyer-phase.cjs
   var require_buyer_phase = __commonJS({
-    "../../../shopee_未結鏢客人/新客限購_候選_v1.3_20261022/chat/src/buyer-phase.cjs"(exports, module) {
+    "chat/src/buyer-phase.cjs"(exports, module) {
       "use strict";
       var { identities, digest, fail } = require_buyer_types();
       var { createApi, queryBuyer, PACING } = require_buyer_orders();
@@ -1660,12 +1754,12 @@
         if (summary.unchecked) fail("PHASE1", "第一段仍有待查買家");
         const accepted = new Set(state.queue.items.filter((p) => ["found", "manualSent", "sent"].includes(core2.itemState(state.queue, saved.records, p))).map((p) => p.account));
         const source = identities(state.entry.text, accepted), records = state.queue.items.map((p) => [p.account, core2.itemState(state.queue, saved.records, p), saved.records[core2.recordKey(state.queue.batchId, p.account)] || null]);
-        return { ...source, shopId: pageShopId(), sourceHash: state.entry.hash, batchId: state.queue.batchId, sourceTool: "precheck", sourceVersion: "0.4.3", snapshotFingerprint: await digest(JSON.stringify([state.entry.hash, state.queue.batchId, records, source])) };
+        return { ...source, shopId: pageShopId(), sourceHash: state.entry.hash, batchId: state.queue.batchId, sourceTool: "precheck", sourceVersion: "0.4.7", snapshotFingerprint: await digest(JSON.stringify([state.entry.hash, state.queue.batchId, records, source])) };
       }
       async function replaySnapshot(state, core2) {
         if (state.running || state.stop || !state.result?.canExport) fail("PHASE1", "回放尚無正式可匯出結果");
         const csv = core2.ordersCsv(state.result), source = identities(csv);
-        return { ...source, shopId: pageShopId(), sourceHash: await digest(csv), batchId: state.config.sessionId, sourceTool: "replay", sourceVersion: "0.2.3", snapshotFingerprint: await digest(JSON.stringify([source, csv])) };
+        return { ...source, shopId: pageShopId(), sourceHash: await digest(csv), batchId: state.config.sessionId, sourceTool: "replay", sourceVersion: "0.2.7", snapshotFingerprint: await digest(JSON.stringify([source, csv])) };
       }
       function mountPhase({ ui: ui2, getSnapshot, gm, automatic }) {
         const box = document.createElement("section");
@@ -1674,6 +1768,7 @@
         const $ = (s) => box.querySelector(s), status = $("[data-buyer-status]");
         let running = false, stopped = false, result = null, binding = null, cache = null, cooldownStore = null;
         const show = (message, error = false) => {
+          ui2.dock?.status(error, "phase2");
           status.textContent = message;
           status.style.color = error ? "#f66" : "";
         };
@@ -1719,6 +1814,8 @@
         async function work(fallback = false) {
           if (running) return;
           running = true;
+          ui2.setBadge?.({ phase: "phase2", running: true, reset: true });
+          ui2.setBadge?.({ phase: "handoff", outcome: "idle" });
           stopped = false;
           result = null;
           binding = null;
@@ -1751,6 +1848,7 @@
                   if (stopped) fail("STOP", "第二段已停止，可接續");
                   await current();
                   if (found.has(person.account)) continue;
+                  ui2.setBadge?.({ phase: "phase2", running: true, done: found.size + 1, total: snap.people.length });
                   show("背景查訂單 " + (found.size + 1) + "／" + snap.people.length + "：" + person.account);
                   let buyer;
                   if (fallback) buyer = { ...person, rawType: "new", queryFailed: true, failureReason: cache.pauseFailureReason || cache.authFailure || "QUERY_UNAVAILABLE", complete: false, aliases: [], checkedAt: (/* @__PURE__ */ new Date()).toISOString() };
@@ -1763,6 +1861,7 @@
                 if (stopped) fail("STOP", "第二段已停止");
                 await current();
                 result = { schemaVersion: 1, policyVersion: POLICY, queryVersion: QUERY_VERSION, queryPacing: PACING, shopId: cache.shopId, sourceSession: snap.sourceSession, sourceTool: snap.sourceTool, sourceVersion: snap.sourceVersion, sourceHash: snap.sourceHash, batchId: snap.batchId, snapshotFingerprint: snap.snapshotFingerprint, jobId: cache.jobId, startedAt: cache.startedAt, completedAt: (/* @__PURE__ */ new Date()).toISOString(), buyers: cache.buyers };
+                ui2.setBadge?.({ phase: "phase2", outcome: "complete" });
                 const n = (t) => result.buyers.filter((b) => b.rawType === t).length;
                 show(`老客人 ${n("old")}、新客人 ${n("new")}（其中查詢失敗 ${result.buyers.filter((b) => b.queryFailed).length}）、上一筆還沒取貨 ${n("pending")}、曾逾期未取件 ${n("unclaimed")}
 已略過 UID 與帳號皆空的卡片 ${result.buyers.reduce((n2, b) => n2 + (b.unattributedCards || 0), 0)} 張（依每位查詢觀察次數加總）
@@ -1776,6 +1875,7 @@
             show(e.code === "AUTH" ? "登入失效：請重新登入後按「查詢／繼續查」。確實無法完成時才採新客人。" : e.message, true);
           } finally {
             running = false;
+            ui2.setBadge?.({ phase: "phase2", running: false });
           }
         }
         $("[data-buyer-start]").addEventListener("click", () => work());
@@ -1813,6 +1913,7 @@
           }
         });
         return { run: () => work(), handoffError(error) {
+          ui2.setBadge?.({ phase: "handoff", outcome: "failed" });
           stopped = true;
           result = null;
           show("第二段交接失敗（" + (error?.code || error?.name || "ERROR") + "）：" + (error?.message || String(error)) + "。第一段結果保留，請保留原檔並提供此錯誤協助排查。", true);
@@ -1824,7 +1925,7 @@
     }
   });
 
-  // ../../../shopee_未結鏢客人/新客限購_候選_v1.3_20261022/chat/src/entry-precheck.mjs
+  // chat/src/entry-precheck.mjs
   var import_precheck_core = __toESM(require_precheck_core(), 1);
   var import_precheck_storage = __toESM(require_precheck_storage(), 1);
   var import_chat_runtime = __toESM(require_chat_runtime(), 1);
@@ -1835,10 +1936,12 @@
     const authorize = async (proof) => {
       try {
         if (ready.state.queue?.batchId !== proof.batchId || ready.state.entry?.hash !== proof.sourceHash) return;
+        ready?.ui.setBadge({ phase: "handoff", running: true });
         const s = await import_buyer_phase.default.precheckSnapshot(ready.state, ready.repo);
         await GM_setValue("buyer-phase1-proof:" + s.batchId, s.snapshotFingerprint);
         controller?.run();
       } catch (e) {
+        ready?.ui.setBadge({ phase: "handoff", outcome: "failed" });
         if (controller) controller.handoffError(e);
         else ready?.ui.show("第二段交接失敗：" + (e?.message || String(e)), true);
       }
@@ -1860,3 +1963,4 @@
   });
 })();
 if(typeof window==='undefined'&&typeof module==='object'&&module.exports){module.exports=globalThis.__SHOPEE_CANDIDATE_NODE__;delete globalThis.__SHOPEE_CANDIDATE_NODE__;}
+})();

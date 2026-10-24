@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee 多場結單通知
 // @namespace    local.shopee.settlement-notice
-// @version      0.2.1
+// @version      0.2.2
 // @description  自訂通知文字，匯入任意已確認買家 Excel，合併去重後手動核對並逐筆通知
 // @match        https://seller.shopee.tw/new-webchat/conversations*
 // @require      https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js
@@ -14,7 +14,43 @@
 /* global ExcelJS, GM_getValue, GM_setValue, GM_registerMenuCommand, module */
 (function settlementNotice() {
   "use strict";
-  const VERSION = "0.2.1";
+/* BEGIN ETHAN TOOL DOCK V1 */
+function createEthanToolDock({id,label,name,version,order,colour,panel,collapse,lockRunning=false,lockText='發送中',onOpen=()=>{}}){
+  const doc=panel.ownerDocument;
+  let dock=doc.getElementById('ethan-tool-dock-v1');
+  const css=(node,values)=>{node.style.setProperty('all','initial','important');for(const [key,value]of Object.entries(values))node.style.setProperty(key,value,'important');};
+  if(!dock){dock=doc.createElement('div');dock.id='ethan-tool-dock-v1';css(dock,{position:'fixed',right:'16px',bottom:'16px','z-index':'2147483647',display:'flex',gap:'6px','align-items':'center','pointer-events':'none',margin:'0',padding:'0',transform:'none',float:'none',width:'max-content',height:'auto','max-width':'none','max-height':'none'});doc.documentElement.append(dock);}
+  if(dock.querySelector('[data-dock-tool="'+id+'"]'))return null;
+  const host=doc.createElement('div');host.dataset.dockTool=id;
+  css(host,{display:'block',position:'relative',order:String(order),'pointer-events':'auto',margin:'0',padding:'0',transform:'none',float:'none',width:'max-content',height:'30px','max-width':'none','max-height':'none','flex-shrink':'0'});
+  const shadow=host.attachShadow({mode:'open'});
+  shadow.innerHTML='<style>:host{all:initial}*{box-sizing:border-box}button{position:relative;height:30px;margin:0;padding:0 10px;border:1px solid var(--tool);border-radius:7px;background:var(--tool);color:#fff;box-shadow:0 2px 7px #0003;font:bold 13px/28px "Microsoft JhengHei",sans-serif;white-space:nowrap;cursor:pointer}button.open{background:#fff;color:var(--tool)}button.error{background:#b91c1c;border-color:#b91c1c;color:#fff}.dot{position:absolute;right:-3px;top:-3px;width:8px;height:8px;background:#dc2626;border-radius:50%;box-shadow:0 0 0 1px #fff}.dot[hidden]{display:none}</style><button type="button"><span></span><i class="dot" hidden></i></button>';
+  const button=shadow.querySelector('button'),text=shadow.querySelector('span'),dot=shadow.querySelector('.dot');button.style.setProperty('--tool',colour);
+  if(collapse){for(const [key,value]of Object.entries({'min-width':'52px',width:'auto',height:'28px',padding:'0 6px','font-size':'12px','line-height':'26px','white-space':'nowrap','flex-shrink':'0'}))collapse.style.setProperty(key,value);}
+  dock.append(host);let opened=false,notice=false,serial=0;const phases=new Map();
+  const current=phase=>{if(!phases.has(phase))phases.set(phase,{running:false,error:false,complete:false,done:null,total:null,serial:0});return phases.get(phase);};
+  const busy=()=>[...phases.values()].some(p=>p.running);
+  function render(){const values=[...phases.values()],error=values.some(p=>p.error),active=values.filter(p=>p.running).sort((a,b)=>b.serial-a.serial)[0],complete=values.some(p=>p.complete);let suffix='';
+    if(error)text.textContent='⚠ '+label;
+    else{if(active)suffix=Number.isFinite(active.done)&&Number.isFinite(active.total)&&active.total>0?' '+active.done+'/'+active.total:' 跑中';else if(!opened&&complete)suffix=' ✓';text.textContent=label+suffix;}
+    button.classList.toggle('open',opened);button.classList.toggle('error',error);button.setAttribute('aria-pressed',String(opened));button.title=name+' v'+version+'；點一下'+(opened?'收起':'打開');button.setAttribute('aria-label',button.title);dot.hidden=!notice;
+    if(collapse){const locked=lockRunning&&busy();collapse.disabled=locked;collapse.textContent=locked?lockText:'收合';collapse.title=locked?'跑的時候不能收合；要停請按緊急停止（或停止）':'收合面板';collapse.setAttribute('aria-expanded',String(opened));collapse.setAttribute('aria-label',locked?lockText+'，不能收合':'收合面板');}
+  }
+  function open(){opened=true;for(const p of phases.values())p.complete=false;panel.style.setProperty('visibility','visible','important');panel.inert=false;panel.removeAttribute('aria-hidden');onOpen();render();}
+  function close(focus=true){if(lockRunning&&busy())return false;opened=false;panel.style.setProperty('visibility','hidden','important');panel.inert=true;panel.setAttribute('aria-hidden','true');if(focus)button.focus({preventScroll:true});render();return true;}
+  function toggle(){if(opened)close();else open();}
+  for(const type of ['pointerdown','pointerup','click','dblclick'])host.addEventListener(type,event=>event.stopPropagation());
+  button.addEventListener('click',event=>{event.preventDefault();event.stopPropagation();toggle();});
+  if(collapse)collapse.addEventListener('click',event=>{event.preventDefault();event.stopPropagation();close();});
+  close(false);
+  return {host,button,open,close,toggle,get opened(){return opened;},setNotice(value){notice=!!value;render();},
+    status(error=false,phase='main'){const p=current(phase);p.error=!!error;if(error){p.complete=false;open();}render();},
+    setBadge({phase='main',running,done,total,outcome,start=false,reset=false}={}){if(reset)phases.delete(phase);const p=current(phase);p.serial=++serial;if(typeof running==='boolean')p.running=running;if(Number.isFinite(done))p.done=Math.max(0,Math.floor(done));if(Number.isFinite(total))p.total=Math.max(0,Math.floor(total));if(start){p.error=false;p.complete=false;p.done=null;p.total=null;open();}if(outcome){p.running=false;p.complete=outcome==='complete';if(outcome!=='complete')p.complete=false;}render();},
+    geometry(){const r=panel.getBoundingClientRect();return r.width>0&&r.height>0&&[r.left,r.top,r.width,r.height].every(Number.isFinite)?r:null;}
+  };
+}
+/* END ETHAN TOOL DOCK V1 */
+  const VERSION = "0.2.2";
   const STORE = Object.freeze({ config: "settlement:config:v1", records: "settlement:records:v1", panelPosition: "settlement:panel-position:v1", batch: "settlement:batch:v1" });
   const DEFAULT_CONFIG = Object.freeze({
     template: "您好，感謝您於10/08～10/11期間於采兒直播間喊單，今天是10/12結單日，提醒您這期間購買的商品要一起結單呦！",
@@ -305,14 +341,17 @@
     if (document.querySelector("[data-settlement-notice]")) return;
     const host = document.createElement("div"); host.setAttribute("data-settlement-notice", "1"); document.body.append(host);
     const root = host.attachShadow({ mode: "open" });
+    let dock;
+    try{
     const savedConfig = GM_getValue(STORE.config, null);
+    const rawRecords=GM_getValue(STORE.records,{});if(!rawRecords||typeof rawRecords!=="object"||Array.isArray(rawRecords))throw new Error("發送紀錄格式有問題，請先恢復紀錄備份。");
     const state = { entries: [], queue: null, running: false, importing: false, stop: false, logs: [], batch: resolveBatch(GM_getValue(STORE.batch, null), savedConfig, GM_getValue(STORE.records, {}) || {}) };
     let config;
     try { config = validateConfig(savedConfig || DEFAULT_CONFIG); } catch { config = { ...DEFAULT_CONFIG }; }
     GM_setValue(STORE.batch, state.batch); GM_setValue(STORE.config, config);
     root.innerHTML = `<style>
       :host{all:initial;font:14px/1.5 "Microsoft JhengHei",sans-serif;color:#253047}
-      *{box-sizing:border-box} .panel{position:fixed;left:18px;bottom:18px;width:450px;max-width:calc(100vw - 36px);max-height:88vh;background:#fff;border:1px solid #cbd5e1;border-radius:12px;box-shadow:0 8px 32px #0003;z-index:2147483646;overflow:hidden}
+      *{box-sizing:border-box} .panel{position:fixed;left:18px;bottom:18px;width:450px;max-width:calc(100vw - 36px);max-height:88vh;background:#fff;border:1px solid #cbd5e1;border-radius:12px;box-shadow:0 8px 32px #0003;z-index:2147483646;visibility:hidden;overflow:hidden}
       header{padding:10px 14px;background:#473968;color:white;display:flex;justify-content:space-between;align-items:center;cursor:grab;user-select:none;touch-action:none}.dragging header{cursor:grabbing}header button{background:#ffffff25;color:white;border:0;cursor:pointer}
       .body{padding:14px;max-height:calc(88vh - 48px);overflow:auto}.closed .body{display:none}h3{font-size:15px;margin:8px 0}p{margin:8px 0}.mini{font-size:12px;color:#566277}
       label{display:block;margin:8px 0}input,textarea,select,button{font:inherit}textarea,select{width:100%;padding:7px;border:1px solid #b8c2d1;border-radius:6px;background:white;color:#253047}textarea{resize:vertical;min-height:110px}
@@ -345,6 +384,7 @@
     }
     function savePanelPosition() {
       const rect = panel.getBoundingClientRect();
+      if(!(rect.width>0&&rect.height>0))return;
       GM_setValue(STORE.panelPosition, { left: Math.round(rect.left), top: Math.round(rect.top) });
     }
     function keepPanelInView() {
@@ -375,7 +415,8 @@
     window.addEventListener("blur", () => finishDrag());
     window.addEventListener("resize", () => { keepPanelInView(); savePanelPosition(); });
     if (typeof ResizeObserver === "function") new ResizeObserver(keepPanelInView).observe(panel);
-    const showStatus = (message, error = false) => { $("[data-status]").textContent = message; $("[data-status]").className = `status ${error ? "error" : ""}`; };
+    dock=createEthanToolDock({id:"settlement",label:"結單",name:"多場結單通知",version:VERSION,order:40,colour:"#473968",panel,collapse:$("[data-collapse]"),lockRunning:true});
+    const showStatus = (message, error = false) => {dock.status(error); $("[data-status]").textContent = message; $("[data-status]").className = `status ${error ? "error" : ""}`; };
     const readRecords = () => {
       const result = GM_getValue(STORE.records, {});
       if (!result || typeof result !== "object" || Array.isArray(result)) throw problem("RECORDS", "發送紀錄格式有問題，請先恢復紀錄備份。");
@@ -384,10 +425,13 @@
     const writeRecord = (item, status, detail) => {
       const records = readRecords();
       records[recordKey(state.queue.batchId, item.account)] = { account: item.account, batchId: state.queue.batchId, status, message: item.message, detail, time: new Date().toISOString() };
-      GM_setValue(STORE.records, records);
+      GM_setValue(STORE.records, records);refreshNotice();
     };
     const log = message => { state.logs.push(`${new Date().toLocaleTimeString("zh-TW", { timeZone: "Asia/Taipei" })} ${message}`); state.logs = state.logs.slice(-300); $("[data-log]").textContent = state.logs.join("\n"); $("[data-log]").scrollTop = $("[data-log]").scrollHeight; };
+    const refreshNotice=()=>dock.setNotice(Object.entries(readRecords()).some(([key,record])=>record?.status==="pending"&&typeof record.account==="string"&&key===recordKey(state.batch.id,record.account)));
+    window.addEventListener("focus",()=>{try{refreshNotice();}catch(error){showStatus(error.message,true);}});
     function lockControls() {
+      dock.setBadge({running:state.running});
       const locked = state.running || state.importing;
       for (const element of root.querySelectorAll("input,textarea,select,button")) if (!element.matches("[data-stop],[data-collapse]")) element.disabled = locked;
       $("[data-start]").disabled = locked || !state.queue?.items.length;
@@ -411,7 +455,7 @@
       $("[data-preview-select]").innerHTML = state.queue.items.map(item => `<option value="${escapeHtml(item.account)}">${escapeHtml(item.account)}</option>`).join("");
       if (state.queue.items.some(item => item.account === previous)) $("[data-preview-select]").value = previous;
       $("[data-pending]").innerHTML = '<option value="">選擇待核對帳號</option>' + state.queue.items.filter(item => recordState(records, state.queue.batchId, item.account) === "pending").map(item => `<option value="${escapeHtml(item.account)}">${escapeHtml(item.account)}</option>`).join("");
-      refreshPreview(); lockControls();
+      refreshPreview(); lockControls();refreshNotice();
     }
     function setConfig(next) { config = validateConfig(next); for (const input of settings) input.value = config[input.dataset.config]; GM_setValue(STORE.config, config); $("[data-authorize]").checked = false; render(); }
     for (const input of settings) input.value = config[input.dataset.config];
@@ -439,7 +483,7 @@
     $("[data-preview-select]").addEventListener("change", refreshPreview);
     $("[data-dry]").addEventListener("change", () => { $("[data-authorize]").checked = false; $("[data-start]").textContent = $("[data-dry]").checked ? "開始演練" : "開始正式發送"; });
     $("[data-stop]").addEventListener("click", () => { state.stop = true; showStatus("正在停止；若已點送出，該筆會保留為待人工核對。"); });
-    $("[data-collapse]").addEventListener("click", () => { panel.classList.toggle("closed"); $("[data-collapse]").textContent = panel.classList.contains("closed") ? "展開" : "收合"; keepPanelInView(); savePanelPosition(); });
+    // 收合由共用工具列處理；保持面板的完整幾何尺寸。
     $("[data-export-config]").addEventListener("click", () => {
       try { const current = validateConfig(Object.fromEntries(settings.map(input => [input.dataset.config, input.value]))); download(JSON.stringify(current, null, 2), "結單通知範本.json", "application/json;charset=utf-8"); } catch (error) { showStatus(error.message, true); }
     });
@@ -505,6 +549,7 @@
         assertSafe(() => state.stop); assertCurrentBatch(); assertRunAllowed(queue);
         // 每筆重新讀紀錄，避免另一個分頁更新後還使用過期快照。
         if (!["ready", "failed"].includes(recordState(readRecords(), queue.batchId, item.account))) continue;
+        dock.setBadge({running:true,done:index+1,total:items.length});
         let attempted = false;
         showStatus(`${dryRun ? "演練" : "發送"} ${index + 1}/${items.length}：${item.account}`);
         try {
@@ -519,6 +564,7 @@
         render();
         if (index < items.length - 1) await delay(dryRun ? 500 : 15000 + Math.floor(Math.random() * 10001));
       }
+      dock.setBadge({outcome:failures===0?"complete":"failed"});
       showStatus(`${dryRun ? "演練" : "本次通知"}完成：${success} 位${dryRun ? "核對通過（未送出）" : "已送出"}，${failures} 位失敗。請匯出名單查看結果。`);
     }
     $("[data-start]").addEventListener("click", async () => {
@@ -528,17 +574,18 @@
         const dryRun = $("[data-dry]").checked;
         assertRunAllowed(state.queue); assertCurrentBatch();
         if (!navigator.locks?.request) throw problem("LOCK", "瀏覽器不支援分頁發送鎖，請使用新版 Chrome／Edge。");
-        state.running = true; state.stop = false; $("[data-authorize]").checked = false; lockControls();
+        state.running = true;dock.setBadge({running:true,start:true,reset:true}); state.stop = false; $("[data-authorize]").checked = false; lockControls();
         await navigator.locks.request("shopee-settlement-notice:send", { ifAvailable: true }, async lock => { if (!lock) throw problem("LOCK", "另一個聊聊分頁正在執行結單通知，請等待它完成。"); await run(dryRun); });
       } catch (error) { showStatus(error.message, true); }
       finally { state.running = false; state.stop = false; render(); }
     });
     render();
     if (typeof GM_registerMenuCommand === "function") {
-      GM_registerMenuCommand("開啟多場結單通知", () => { panel.classList.remove("closed"); $("[data-collapse]").textContent = "收合"; keepPanelInView(); savePanelPosition(); });
+      GM_registerMenuCommand("開啟多場結單通知", () => { dock.open(); keepPanelInView(); savePanelPosition(); });
       GM_registerMenuCommand("重設結單通知面板位置", () => { placePanel(18, window.innerHeight - panel.getBoundingClientRect().height - 18); savePanelPosition(); });
       GM_registerMenuCommand("開始新的結單通知", beginNewNotice);
     }
+    }catch(error){if(dock)dock.status(true);else{root.innerHTML='<section class="panel" style="position:fixed;left:18px;bottom:56px;width:450px;background:white;padding:14px;z-index:2147483646;visibility:hidden"><button data-collapse>收合</button><p></p></section>';const panel=root.querySelector('section');panel.querySelector('p').textContent='初始化失敗：'+(error?.message||String(error));dock=createEthanToolDock({id:'settlement',label:'結單',name:'多場結單通知',version:VERSION,order:40,colour:'#473968',panel,collapse:panel.querySelector('button'),lockRunning:true});dock.status(true);}}
   }
   const testApi = { VERSION, STORE, DEFAULT_CONFIG, validateConfig, renderMessage, validateBuyerAccount, extractConfirmed, readWorkbook, buildQueue, recordKey, recordState, runnableItems, assertRunAllowed, resolveBatch, mergeBackup, listCsv, sendOne };
   if (typeof module !== "undefined" && module.exports) module.exports = testApi;
