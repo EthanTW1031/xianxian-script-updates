@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "publishedAt": "2026-10-25T04:55:42.217Z",
+  "publishedAt": "2026-10-25T07:58:18.638Z",
   "scripts": [
     {
       "id": "fb-inbox-finder",
@@ -36,11 +36,11 @@
       "id": "jambo-product-image-batch-upload",
       "name": "Jambo 商品圖片批次上傳",
       "namespace": "https://jambolive.tv/",
-      "version": "1.0.5",
+      "version": "1.0.6",
       "file": "scripts/jambo-product-image-batch-upload.user.js",
-      "sha256": "b7ea8d0c29994b8c5b5cf4daca90fb3fe5ad821e3c629ed5cf87c9b90f65a366",
-      "bytes": 50893,
-      "updatedAt": "2026-10-24T08:35:17.084Z"
+      "sha256": "ad4a611219eb1696991c3d371803780afb31e765f953239074ec60a8baf427d3",
+      "bytes": 56840,
+      "updatedAt": "2026-10-25T07:58:18.638Z"
     },
     {
       "id": "jambo-stock",

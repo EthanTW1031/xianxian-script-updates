@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jambo 商品圖片批次上傳
 // @namespace    https://jambolive.tv/
-// @version      1.0.5
+// @version      1.0.6
 // @description  依商品名稱中的代碼配對本機圖片，逐件安全上傳並儲存商品圖片
 // @match        https://jambolive.tv/console/commodity/*
 // @grant        unsafeWindow
@@ -55,6 +55,10 @@ function createEthanToolDock({id,label,name,version,order,colour,panel,collapse,
   const EXACT_FILE_CODE_PATTERN = /^([A-Z]\d{2,3})([\u3400-\u9fff]+)?$/i;
   const SUPPORTED_IMAGE_PATTERN = /\.(?:jpe?g|png)$/i;
   const DEFAULT_IMAGE_PATTERN = /(?:default_photo|ic-upload-photo)\.(?:jpg|jpeg|png|svg)/i;
+  const PREVIEW_IMAGE_SELECTOR =
+    '.product-main-info-cover-preview img, img.jb-upload-preview';
+  const PAGE_FAILURE_PATTERN =
+    /失敗|未授權|唯獨|唯讀|請輸入|請指定|請修正|請選擇|錯誤|太長|不可|需同時|需大於|未加入/;
   const LOAD_MORE_LABEL = '載入更多';
   const MAXIMUM_LOADS = 100;
   const EDIT_OPEN_TIMEOUT = 30000;
@@ -238,6 +242,46 @@ function createEthanToolDock({id,label,name,version,order,colour,panel,collapse,
     return typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   }
 
+  // 2026-10 起 Jambo 商品頁改成新版表格（#commodity-table），舊版 p.name 讀法保留。
+  function getModernTable() {
+    const table = document.getElementById('commodity-table');
+    return table?.querySelector('tbody [data-jb-cell="title"]') ? table : null;
+  }
+
+  function getModernRows() {
+    const table = getModernTable();
+    return table ? Array.from(table.querySelectorAll(':scope > tbody > tr')) : [];
+  }
+
+  function getModernNameElement(row) {
+    // 商品描述（例如「+1出3」）也是 .u-block，要排除 .jb-caption。
+    return row.querySelector(
+      ':scope > [data-jb-cell="title"] .jb-media-cell__body > .u-block:not(.jb-caption)'
+    );
+  }
+
+  function getModernProductName(nameElement) {
+    // 「1 個樣式」是名稱裡的子元素，不屬於商品名稱。
+    return cleanText(
+      Array.from(nameElement.childNodes)
+        .filter((node) => node.nodeType === 3)
+        .map((node) => node.textContent)
+        .join('')
+    );
+  }
+
+  function normalizeImageUrl(value) {
+    if (!value) return '';
+    try {
+      // 網站會在圖片網址後面加 _t= 防快取，比對時要拿掉。
+      const url = new URL(value, window.location.href);
+      url.searchParams.delete('_t');
+      return url.href;
+    } catch {
+      return String(value);
+    }
+  }
+
   function waitUntil(predicate, timeout, errorMessage, interval = 150) {
     const startedAt = Date.now();
 
@@ -296,7 +340,9 @@ function createEthanToolDock({id,label,name,version,order,colour,panel,collapse,
   }
 
   function getProductProgress() {
-    const loaded = document.querySelectorAll('p.name').length;
+    const loaded = getModernTable()
+      ? getModernRows().filter(getModernNameElement).length
+      : document.querySelectorAll('p.name').length;
     const progressElement = Array.from(
       document.querySelectorAll('div, span, p')
     ).find((element) =>
@@ -308,6 +354,7 @@ function createEthanToolDock({id,label,name,version,order,colour,panel,collapse,
 
     return {
       loaded,
+      reportedLoaded: match ? Number(match[1]) : null,
       total: match ? Number(match[2]) : null,
     };
   }
@@ -323,6 +370,17 @@ function createEthanToolDock({id,label,name,version,order,colour,panel,collapse,
   }
 
   function isAllProductsLoaded() {
+    if (getModernTable()) {
+      const progress = getProductProgress();
+      const marker = document.querySelector('#commodity-app .jb-table-scroll__foot');
+      return (
+        cleanText(marker?.textContent).includes('載入完成') &&
+        !findLoadMoreButton() &&
+        progress.total !== null &&
+        progress.loaded === progress.total &&
+        progress.reportedLoaded === progress.total
+      );
+    }
     return Array.from(document.querySelectorAll('.loading-indicator')).some(
       (indicator) => cleanText(indicator.textContent).includes('載入完成')
     );
@@ -536,23 +594,69 @@ function createEthanToolDock({id,label,name,version,order,colour,panel,collapse,
     return { loadResult, expandResult };
   }
 
+  function buildProduct({ row, editButton, name, productId, styleText, image }) {
+    const code = extractProductCode(name);
+    if (!editButton || !code) return null;
+
+    const productKey = productId ? `id:${productId}` : `name:${name}`;
+    const imageUrl = image?.currentSrc || image?.src || '';
+
+    return {
+      code,
+      name,
+      productId,
+      productKey,
+      styleText,
+      row,
+      editButton,
+      imageUrl,
+      hasExistingPhoto:
+        Boolean(imageUrl) && !DEFAULT_IMAGE_PATTERN.test(imageUrl),
+    };
+  }
+
+  function getModernProductRows() {
+    return getModernRows()
+      .map((row) => {
+        const nameElement = getModernNameElement(row);
+        if (!nameElement) return null;
+
+        const idText = cleanText(
+          row.querySelector(':scope > [data-jb-cell="head"]')?.textContent
+        );
+        // 新版頁面款式直接列在「總庫存/樣式」欄，不用展開。
+        const styleText = Array.from(
+          row.querySelectorAll('[data-label="總庫存/樣式"] .jb-rowlines .u-truncate')
+        )
+          .map((cell) => cleanText(cell.getAttribute('title') || cell.textContent))
+          .filter(Boolean)
+          .join(' ');
+
+        return buildProduct({
+          row,
+          editButton: row.querySelector(
+            ':scope > [data-jb-cell="actions"] button[title="編輯"]'
+          ),
+          name: getModernProductName(nameElement),
+          productId: /^\d{6,}$/.test(idText) ? idText : '',
+          styleText,
+          image: row.querySelector(':scope > [data-jb-cell="title"] img'),
+        });
+      })
+      .filter(Boolean);
+  }
+
   function getProductRows() {
+    if (getModernTable()) return getModernProductRows();
+
     return Array.from(document.querySelectorAll('tr'))
       .map((row) => {
-        const editButton = row.querySelector(
-          'button.icon-edit, button[title="編輯"]'
-        );
         const nameElement = row.querySelector('p.name');
-        if (!editButton || !nameElement) return null;
-
-        const name = cleanText(nameElement.textContent);
-        const code = extractProductCode(name);
-        if (!code) return null;
+        if (!nameElement) return null;
 
         const productId = Array.from(row.querySelectorAll('p'))
           .map((element) => cleanText(element.textContent))
           .find((text) => /^\d{6,}$/.test(text)) || '';
-        const productKey = productId ? `id:${productId}` : `name:${name}`;
         const styleText = Array.from(row.querySelectorAll('table tr'))
           .map((inventoryRow) =>
             Array.from(inventoryRow.children).find(
@@ -563,20 +667,14 @@ function createEthanToolDock({id,label,name,version,order,colour,panel,collapse,
           .map((cell) => cleanText(cell.textContent))
           .join(' ');
 
-        const image = row.querySelector('img.photo');
-        const imageUrl = image?.currentSrc || image?.src || '';
-
-        return {
-          code,
-          name,
-          productId,
-          productKey,
-          styleText,
+        return buildProduct({
           row,
-          imageUrl,
-          hasExistingPhoto:
-            Boolean(imageUrl) && !DEFAULT_IMAGE_PATTERN.test(imageUrl),
-        };
+          editButton: row.querySelector('button.icon-edit, button[title="編輯"]'),
+          name: cleanText(nameElement.textContent),
+          productId,
+          styleText,
+          image: row.querySelector('img.photo'),
+        });
       })
       .filter(Boolean);
   }
@@ -832,16 +930,13 @@ function createEthanToolDock({id,label,name,version,order,colour,panel,collapse,
       throw new Error(`頁面上找不到商品 ${entry.displayCode}`);
     }
 
-    const editButton = product.row.querySelector(
-      'button.icon-edit, button[title="編輯"]'
-    );
-    if (!editButton) {
+    if (!product.editButton?.isConnected) {
       throw new Error(`找不到 ${entry.displayCode} 的編輯按鈕`);
     }
 
     product.row.scrollIntoView({ block: 'center', behavior: 'auto' });
     await delay(150);
-    editButton.click();
+    product.editButton.click();
 
     const modal = await waitUntil(
       () => {
@@ -863,15 +958,16 @@ function createEthanToolDock({id,label,name,version,order,colour,panel,collapse,
     const fileInput = modal.querySelector(
       'input[type="file"][accept*="image/jpeg"]'
     );
-    const previewImage = modal.querySelector(
-      '.product-main-info-cover-preview img'
-    );
+    const previewImage = modal.querySelector(PREVIEW_IMAGE_SELECTOR);
 
     if (!fileInput || !previewImage) {
       throw new Error(`${entry.displayCode} 的圖片上傳欄位不存在`);
     }
 
-    const previousImageUrl = previewImage.currentSrc || previewImage.src || '';
+    const previousImageUrl = normalizeImageUrl(
+      previewImage.currentSrc || previewImage.src || ''
+    );
+    const messageIndex = state.alertMessages.length;
     const pageWindow = getPageWindow();
     const transfer = new pageWindow.DataTransfer();
     transfer.items.add(entry.imageFile);
@@ -889,19 +985,25 @@ function createEthanToolDock({id,label,name,version,order,colour,panel,collapse,
 
     await waitUntil(
       () => {
+        const failure = state.alertMessages
+          .slice(messageIndex)
+          .find(({ isError }) => isError);
+        if (failure) {
+          throw new Error(`${entry.displayCode}：${failure.message}`);
+        }
+
         const currentModal = getEditModal();
         if (!currentModal) return null;
 
-        const currentImage = currentModal.querySelector(
-          '.product-main-info-cover-preview img'
-        );
+        const currentImage = currentModal.querySelector(PREVIEW_IMAGE_SELECTOR);
         const currentFileInput = currentModal.querySelector(
           'input[type="file"][accept*="image/jpeg"]'
         );
         const uploadLabel = currentFileInput?.closest('label');
         const uploadText = cleanText(uploadLabel?.textContent);
-        const currentImageUrl =
-          currentImage?.currentSrc || currentImage?.src || '';
+        const currentImageUrl = normalizeImageUrl(
+          currentImage?.currentSrc || currentImage?.src || ''
+        );
         const imageChanged =
           Boolean(currentImageUrl) &&
           currentImageUrl !== previousImageUrl &&
@@ -939,7 +1041,40 @@ function createEthanToolDock({id,label,name,version,order,colour,panel,collapse,
       throw new Error('無法接管網站成功提示，批次上傳已停止');
     }
 
+    // 新版頁面的成功／失敗改用右下角提示框（.jb-toast），不再跳 alert。
+    const seenToasts = new WeakSet();
+    const recordToast = (toast) => {
+      if (seenToasts.has(toast)) return;
+      seenToasts.add(toast);
+      state.alertMessages.push({
+        // ✕ 關閉鈕是提示框的子元素，只取文字。
+        message: cleanText(
+          Array.from(toast.childNodes)
+            .filter((node) => node.nodeType === 3)
+            .map((node) => node.textContent)
+            .join('')
+        ),
+        isError: toast.classList.contains('jb-toast--error'),
+        time: Date.now(),
+      });
+    };
+    document.querySelectorAll('.jb-toast').forEach((toast) => seenToasts.add(toast));
+    const toastObserver = new MutationObserver((mutations) => {
+      for (const mutation of mutations) {
+        for (const node of mutation.addedNodes) {
+          if (node.nodeType !== 1) continue;
+          if (node.matches('.jb-toast')) recordToast(node);
+          node.querySelectorAll('.jb-toast').forEach(recordToast);
+        }
+      }
+    });
+    toastObserver.observe(document.documentElement, {
+      childList: true,
+      subtree: true,
+    });
+
     state.restoreAlert = () => {
+      toastObserver.disconnect();
       try {
         pageWindow.alert = originalAlert;
       } catch (error) {
@@ -947,6 +1082,14 @@ function createEthanToolDock({id,label,name,version,order,colour,panel,collapse,
       }
       state.restoreAlert = null;
     };
+  }
+
+  function getOpenPageConfirm() {
+    return (
+      Array.from(document.querySelectorAll('dialog[open]')).find((dialog) =>
+        dialog.querySelector('[data-jb-confirm]')
+      ) ?? null
+    );
   }
 
   function stopAlertCapture() {
@@ -962,23 +1105,40 @@ function createEthanToolDock({id,label,name,version,order,colour,panel,collapse,
     }
 
     const alertIndex = state.alertMessages.length;
+    const previousRowImageUrl = normalizeImageUrl(
+      findProductByKey(entry.productKey)?.imageUrl
+    );
     confirmButton.click();
 
     await waitUntil(
       () => {
         const messages = state.alertMessages.slice(alertIndex);
-        const failure = messages.find(({ message }) =>
-          /失敗|未授權|請輸入|請指定|請修正|錯誤/.test(message)
+        const failure = messages.find(
+          ({ message, isError }) => isError || PAGE_FAILURE_PATTERN.test(message)
         );
         if (failure) {
           throw new Error(`${entry.displayCode}：${failure.message}`);
+        }
+
+        // 網站的確認視窗（例如「場次不存在，是否建立？」）不代按，交給人處理。
+        const pageConfirm = getOpenPageConfirm();
+        if (pageConfirm) {
+          const question = cleanText(
+            pageConfirm.querySelector('.jb-modal__body')?.textContent ||
+              pageConfirm.textContent
+          );
+          throw new Error(
+            `${entry.displayCode}：網站跳出「${question}」，請手動處理後再繼續`
+          );
         }
 
         const success = messages.some(({ message }) =>
           /編輯商品成功|商品成功/.test(message)
         );
         const updatedProduct = findProductByKey(entry.productKey);
-        const rowImageUpdated = Boolean(updatedProduct?.hasExistingPhoto);
+        const rowImageUpdated =
+          Boolean(updatedProduct?.hasExistingPhoto) &&
+          normalizeImageUrl(updatedProduct.imageUrl) !== previousRowImageUrl;
         return !modal.isConnected && (success || rowImageUpdated);
       },
       PRODUCT_SAVE_TIMEOUT,
@@ -1101,8 +1261,11 @@ function createEthanToolDock({id,label,name,version,order,colour,panel,collapse,
       const { loadResult, expandResult } = await prepareAllProducts();
       const entries = scanLoadedProducts();
       const readyCount = entries.filter((entry) => entry.status === 'ready').length;
+      const expandText = getModernTable()
+        ? ''
+        : `、展開 ${expandResult.expandedCount} 件`;
       setStatus(
-        `準備完成：載入 ${loadResult.loaded} 件、展開 ${expandResult.expandedCount} 件，可上傳 ${readyCount} 件`
+        `準備完成：載入 ${loadResult.loaded} 件${expandText}，可上傳 ${readyCount} 件`
       );
       dock?.setBadge({outcome:"complete"});
       window.scrollTo({ top: 0, behavior: 'auto' });
@@ -1397,7 +1560,7 @@ function createEthanToolDock({id,label,name,version,order,colour,panel,collapse,
     });
 
     document.body.append(panel);
-    dock=createEthanToolDock({id:"jambo-image",label:"圖片",name:"Jambo 商品圖片批次上傳",version:"1.0.5",order:10,colour:"#0f766e",panel,collapse:panel.querySelector(".jpi-collapse"),lockRunning:true,lockText:"上傳中"});
+    dock=createEthanToolDock({id:"jambo-image",label:"圖片",name:"Jambo 商品圖片批次上傳",version:"1.0.6",order:10,colour:"#0f766e",panel,collapse:panel.querySelector(".jpi-collapse"),lockRunning:true,lockText:"上傳中"});
     clampPanelPosition = makePanelDraggable(
       panel,
       dragHandle,
