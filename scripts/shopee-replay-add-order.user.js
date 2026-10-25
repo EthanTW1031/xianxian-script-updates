@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee 回放加單
 // @namespace    local.shopee.replay-add-order
-// @version      0.2.8
+// @version      0.2.9
 // @description  只讀聊聊回放加單，使用直播解析器，選 JAMBO 匯出檔讀商品清單，輸出獨立回放 CSV 與核對清單
 // @match        https://seller.shopee.tw/new-webchat/conversations*
 // @grant        GM_getValue
@@ -22,6 +22,7 @@
 // 0.2.6 (2026-10-24, GPT review v0.1): a boundary repeat is accepted only while the page size fixed at the start of the run holds and every load so far is whole pages; a page-size change, or a load with no new message while more pages remain, stops the run; a six-digit title that is not a real date no longer ends the current card; the 預NN note no longer says the control app maps it back.
 // 0.2.7 (2026-10-24, real page): a chat opened at the first unread message can stop short of latest_message_id; scroll the message list to the bottom until the latest message is loaded (each scroll must bring new messages, read messages must not change, at most 30 scrolls), then read older messages as before. Ethan asked Claude to change it.
 // 0.2.8 (2026-10-24): control app 0.1.17 maps XNN back to the JAMBO code 預NN automatically; the 預NN note now says so instead of asking staff to fix the file first.
+// 0.2.9 isolated candidate (2026-10-25): wait up to 10 seconds for the current conversation message UI; re-check conversation and loaded message IDs on every retry; stop on identity changes, content changes, security checks or timeout.
 /* ===== BEGIN ExcelJS 4.4.0 (MIT License, https://github.com/exceljs/exceljs) — verbatim dist/exceljs.min.js, sha256 7e49da68588e250dbb8bba190d2caa8ab3787cc0284bda1d8b2f805c4df742c9 ===== */
 const __REPLAY_EXCELJS__=(function(){var module={exports:{}},exports=module.exports,define;
 /*! ExcelJS 19-10-2023 */
@@ -145,9 +146,9 @@ function createEthanToolDock({id,label,name,version,order,colour,panel,collapse,
     mod
   ));
 
-  // chat/src/util.cjs
+  // src/util.cjs
   var require_util = __commonJS({
-    "chat/src/util.cjs"(exports, module) {
+    "src/util.cjs"(exports, module) {
       "use strict";
       var TaskError = class extends Error {
         constructor(code, message) {
@@ -192,9 +193,9 @@ function createEthanToolDock({id,label,name,version,order,colour,panel,collapse,
     }
   });
 
-  // chat/src/replay-core.cjs
+  // src/replay-core.cjs
   var require_replay_core = __commonJS({
-    "chat/src/replay-core.cjs"(exports, module) {
+    "src/replay-core.cjs"(exports, module) {
       "use strict";
       var { problem, ordinal, decimal, safeUid, compareIds, REPLAY_SEARCH_TEXT_TYPE, REPLAY_SEARCH_EXCLUDED_TYPES } = require_util();
       var HEADERS = Object.freeze(["擷取時間", "直播Session", "限定時段序號", "留言ID", "買家UID", "買家帳號", "原始留言", "正規化留言", "商品代號", "品名", "規格尺寸", "數量", "價格", "狀態", "待確認", "來源", "喊單則數", "彙總件數"]);
@@ -449,9 +450,9 @@ function createEthanToolDock({id,label,name,version,order,colour,panel,collapse,
     }
   });
 
-  // chat/src/chat-runtime.cjs
+  // src/chat-runtime.cjs
   var require_chat_runtime = __commonJS({
-    "chat/src/chat-runtime.cjs"(exports, module) {
+    "src/chat-runtime.cjs"(exports, module) {
       "use strict";
       var { problem, norm, decimal, safeUid, compareIds, canonical, REPLAY_SEARCH_TEXT_TYPE, REPLAY_SEARCH_EXCLUDED_TYPES } = require_util();
       var LOCK_NAME = "shopee-settlement-notice:send";
@@ -905,9 +906,7 @@ function createEthanToolDock({id,label,name,version,order,colour,panel,collapse,
         function messageScroller(candidate, frame) {
           const ids = new Set(frame.messages.map((m) => m.id));
           const nodes = [...document.querySelectorAll('[data-cy="webchat-message-receive"],[data-cy="webchat-message-send"]')].filter((e) => visible(e) && ownEntityInProps(e, (v) => v.conversation_id === candidate.conversation_id && decimal(v.id) && ids.has(v.id)));
-          const found = nodes.map(scrollParent).find(Boolean);
-          if (!found) throw problem("UI_BINDING", "無法確認目標對話的訊息捲動區，已停止。");
-          return found;
+          return nodes.map(scrollParent).find(Boolean) || null;
         }
         async function readConversation(candidate, startNs) {
           let frame = await openConversation(candidate);
@@ -925,11 +924,27 @@ function createEthanToolDock({id,label,name,version,order,colour,panel,collapse,
               collected.set(m.id, m);
             }
           };
+          const bindScroller = async (allowBehind) => {
+            onStatus("等待目標對話的訊息區載入…");
+            const bound = await wait(() => {
+              const s = currentStore();
+              if (s.getState()?.conversationReducer?.currentConversationId !== candidate.conversation_id) throw problem("BUYER_BINDING", "等待訊息區時，目標對話已切換，已停止。");
+              const next = conversationFrame(s, candidate.conversation_id, { allowBehind });
+              if (!next) return null;
+              if (next.conversation.to_name !== candidate.to_name || next.conversation.to_id !== candidate.to_id || next.conversation.is_blocked) throw problem("BUYER_BINDING", "等待訊息區時，買家身分或封鎖狀態已變動，已停止。");
+              collect(next);
+              const found = messageScroller(candidate, next);
+              return found ? { frame: next, scroller: found } : null;
+            }, timing.conversation, stop, "UI_BINDING", `目標對話的訊息區等待 ${Math.round(timing.conversation / 1e3)} 秒仍未載入或無法核對，已停止。`);
+            frame = bound.frame;
+            return bound.scroller;
+          };
           for (let round = 0; frame.behind; round++) {
             safe(stop);
             collect(frame);
             if (round >= MAX_LATEST_ROUNDS) throw problem("LATEST_NOT_LOADED", `這個對話往下捲了 ${MAX_LATEST_ROUNDS} 次還沒讀到最新一端，已停止；請人工打開這位的對話捲到最底後重跑。`);
-            if (!scroller) scroller = messageScroller(candidate, frame);
+            if (!scroller) scroller = await bindScroller(true);
+            if (!frame.behind) break;
             if (!document.contains(scroller)) throw problem("UI_BINDING", "訊息捲動區被替換，已停止。");
             const known = new Set(collected.keys()), bottom = () => Math.max(0, scroller.scrollHeight - scroller.clientHeight);
             if (bottom() > 0 && scroller.scrollTop >= bottom() - 1) {
@@ -952,7 +967,11 @@ function createEthanToolDock({id,label,name,version,order,colour,panel,collapse,
             collect(frame);
             const oldest = frame.messages.at(-1);
             if (frame.hasMoreOlder === false || oldest && BigInt(oldest.nano) < startNs) break;
-            if (!scroller) scroller = messageScroller(candidate, frame);
+            if (!scroller) {
+              scroller = await bindScroller(false);
+              const first = frame.messages.at(-1);
+              if (frame.hasMoreOlder === false || first && BigInt(first.nano) < startNs) break;
+            }
             if (!document.contains(scroller)) throw problem("UI_BINDING", "訊息捲動區被替換，已停止。");
             const known = new Set(collected.keys());
             if (scroller.scrollTop === 0 && scroller.scrollHeight > scroller.clientHeight) {
@@ -986,9 +1005,9 @@ function createEthanToolDock({id,label,name,version,order,colour,panel,collapse,
     }
   });
 
-  // chat/src/jambo-catalog.cjs
+  // src/jambo-catalog.cjs
   var require_jambo_catalog = __commonJS({
-    "chat/src/jambo-catalog.cjs"(exports, module) {
+    "src/jambo-catalog.cjs"(exports, module) {
       "use strict";
       var { problem, ordinal } = require_util();
       var SHEET = "五欄商品清單";
@@ -1108,9 +1127,9 @@ ${lines.join("\n")}`;
     }
   });
 
-  // chat/src/panel.cjs
+  // src/panel.cjs
   var require_panel = __commonJS({
-    "chat/src/panel.cjs"(exports, module) {
+    "src/panel.cjs"(exports, module) {
       "use strict";
       var { safeMessage } = require_util();
       var BASE_CSS = `:host{all:initial;font:14px/1.5 "Microsoft JhengHei",sans-serif;color:#26354b}*{box-sizing:border-box}.panel{position:fixed;width:360px;max-width:calc(100vw - 24px);max-height:78vh;background:#fff;border:1px solid #bac7d8;border-radius:10px;box-shadow:0 6px 28px #0003;z-index:2147483646;visibility:hidden;overflow:hidden}header{display:flex;justify-content:space-between;align-items:center;padding:10px 12px;cursor:grab;touch-action:none;color:#fff}header button{background:#ffffff22;color:#fff;border:0}.body{padding:12px;max-height:calc(78vh - 44px);overflow:auto}.closed .body,.hidden{display:none}label{display:block;margin:7px 0}textarea,input,select,button{font:inherit}textarea,input:not([type=checkbox]),select{width:100%;padding:6px;border:1px solid #aebccd;border-radius:5px}textarea{min-height:85px;resize:vertical}button{padding:6px 9px;border:1px solid #b6c4d6;border-radius:5px;background:#f5f8fc;cursor:pointer}button:disabled{opacity:.5;cursor:default}.actions{display:flex;gap:6px;flex-wrap:wrap;margin:10px 0}.primary{background:#176e63;color:#fff}.danger{background:#b43030;color:white}.status,.mini,pre{white-space:pre-wrap;overflow-wrap:anywhere}.mini{font-size:12px;color:#596b81}.error{color:#aa2525}pre{max-height:145px;overflow:auto;background:#eef4fa;padding:7px;margin:7px 0}.check{display:flex;gap:7px;align-items:start}.stop{position:sticky;bottom:0;width:100%}`;
@@ -1163,7 +1182,7 @@ ${lines.join("\n")}`;
           place(r.left, r.top);
         });
         const replay = attribute === "data-replay-add-order";
-        const dock = createEthanToolDock({ id: replay ? "replay" : "precheck", label: replay ? "回放" : "預檢", name: replay ? "回放加單" : "帳號預檢", version: replay ? "0.2.7" : "0.4.7", order: replay ? 20 : 10, colour, panel, collapse: $("[data-collapse]") });
+        const dock = createEthanToolDock({ id: replay ? "replay" : "precheck", label: replay ? "回放" : "預檢", name: replay ? "回放加單" : "帳號預檢", version: replay ? "0.2.9" : "0.4.7", order: replay ? 20 : 10, colour, panel, collapse: $("[data-collapse]") });
         const show = (message, error = false) => {
           dock.status(error, "phase1");
           const target = $("[data-status]");
@@ -1208,14 +1227,14 @@ ${lines.join("\n")}`;
     }
   });
 
-  // chat/src/replay-ui.cjs
+  // src/replay-ui.cjs
   var require_replay_ui = __commonJS({
-    "chat/src/replay-ui.cjs"(exports, module) {
+    "src/replay-ui.cjs"(exports, module) {
       "use strict";
       var chat2 = require_chat_runtime();
       var { problem, safeMessage } = require_util();
       var { mountPanel, gmAdapter } = require_panel();
-      var VERSION = "0.2.8";
+      var VERSION = "0.2.9";
       var STORE = Object.freeze({ config: "replay:config:v1", panelPosition: "replay:panel-position:v1" });
       async function initReplay(core2, jambo2, onFormalSuccess = async () => {
       }) {
@@ -1440,9 +1459,9 @@ ${config.codes.length} 個商品（${config.codes[0]}～${config.codes.at(-1)}�
     }
   });
 
-  // chat/src/precheck-core.cjs
+  // src/precheck-core.cjs
   var require_precheck_core = __commonJS({
-    "chat/src/precheck-core.cjs"(exports, module) {
+    "src/precheck-core.cjs"(exports, module) {
       "use strict";
       var { problem, norm, clone } = require_util();
       var HEADERS = Object.freeze(["擷取時間", "直播Session", "限定時段序號", "留言ID", "買家UID", "買家帳號", "原始留言", "正規化留言", "商品代號", "品名", "規格尺寸", "數量", "價格", "狀態", "待確認", "來源", "喊單則數", "彙總件數"]);
@@ -1651,9 +1670,9 @@ ${config.codes.length} 個商品（${config.codes[0]}～${config.codes.at(-1)}�
     }
   });
 
-  // chat/src/buyer-types.cjs
+  // src/buyer-types.cjs
   var require_buyer_types = __commonJS({
-    "chat/src/buyer-types.cjs"(exports, module) {
+    "src/buyer-types.cjs"(exports, module) {
       "use strict";
       var { splitCsv, validateBuyerAccount } = require_precheck_core();
       var TYPES = Object.freeze({ OLD: "old", NEW: "new", PENDING: "pending", UNCLAIMED: "unclaimed" });
@@ -1728,9 +1747,9 @@ ${config.codes.length} 個商品（${config.codes[0]}～${config.codes.at(-1)}�
     }
   });
 
-  // chat/src/buyer-orders.cjs
+  // src/buyer-orders.cjs
   var require_buyer_orders = __commonJS({
-    "chat/src/buyer-orders.cjs"(exports, module) {
+    "src/buyer-orders.cjs"(exports, module) {
       "use strict";
       var { fail, id, cardSummary, classify } = require_buyer_types();
       var PATHS = { index: "/api/v3/order/search_order_list_index", cards: "/api/v3/order/get_order_list_card_list", detail: "/api/v3/order/get_one_order" };
@@ -1912,9 +1931,9 @@ ${config.codes.length} 個商品（${config.codes[0]}～${config.codes.at(-1)}�
     }
   });
 
-  // chat/src/buyer-query-guard.cjs
+  // src/buyer-query-guard.cjs
   var require_buyer_query_guard = __commonJS({
-    "chat/src/buyer-query-guard.cjs"(exports, module) {
+    "src/buyer-query-guard.cjs"(exports, module) {
       "use strict";
       var SHARED_COOLDOWN_KEY = "shopee-buyer-orders:shared-cooldown:v1";
       var GM_COOLDOWN_KEY = "buyer-orders:cooldown:v1";
@@ -1975,9 +1994,9 @@ ${config.codes.length} 個商品（${config.codes[0]}～${config.codes.at(-1)}�
     }
   });
 
-  // chat/src/buyer-phase.cjs
+  // src/buyer-phase.cjs
   var require_buyer_phase = __commonJS({
-    "chat/src/buyer-phase.cjs"(exports, module) {
+    "src/buyer-phase.cjs"(exports, module) {
       "use strict";
       var { identities, digest, fail } = require_buyer_types();
       var { createApi, queryBuyer, PACING } = require_buyer_orders();
@@ -2176,7 +2195,7 @@ ${config.codes.length} 個商品（${config.codes[0]}～${config.codes.at(-1)}�
     }
   });
 
-  // chat/vendor/live-capture/parser.js
+  // vendor/live-capture/parser.js
   var parser_exports = {};
   __export(parser_exports, {
     BUILTIN_SPEC_KEYWORDS: () => BUILTIN_SPEC_KEYWORDS,
@@ -2194,7 +2213,7 @@ ${config.codes.length} 個商品（${config.codes[0]}～${config.codes.at(-1)}�
     tokenizeSpecText: () => tokenizeSpecText
   });
 
-  // chat/vendor/live-capture/constants.js
+  // vendor/live-capture/constants.js
   var APP_PREFIX = "slocc:v1";
   var SESSION_KEY_PREFIX = `${APP_PREFIX}:session:`;
   var TAB_ID_KEY = `${APP_PREFIX}:tab-id`;
@@ -2221,7 +2240,7 @@ ${config.codes.length} 個商品（${config.codes[0]}～${config.codes.at(-1)}�
     OBSERVER: "observer"
   });
 
-  // chat/vendor/live-capture/parser.js
+  // vendor/live-capture/parser.js
   var PRODUCT_CODE_PATTERN = /^[A-Z][0-9]{2,3}$/u;
   var LEADING_PRODUCT_CODE_PATTERN = /^([A-Z](?:[0-9]{3}|[0-9]{2}))(?![0-9])/u;
   var CONFIRMED_ORDER_PATTERN = /^(?<productCode>[A-Z][0-9]{2,3})(?:\s+(?<variantOrSize>[A-Z0-9_-]{1,10}))?\s*\+\s*(?<quantity>[0-9]+)$/u;
@@ -2841,7 +2860,7 @@ ${config.codes.length} 個商品（${config.codes[0]}～${config.codes.at(-1)}�
     return compatibleResult(normalizedMessage, RAW_CLASSIFICATIONS.CHAT);
   }
 
-  // chat/vendor/live-capture/catalog-import.js
+  // vendor/live-capture/catalog-import.js
   var catalog_import_exports = {};
   __export(catalog_import_exports, {
     CATALOG_HEADERS: () => CATALOG_HEADERS,
@@ -3310,7 +3329,7 @@ ${config.codes.length} 個商品（${config.codes[0]}～${config.codes.at(-1)}�
     };
   }
 
-  // chat/vendor/live-capture/csv.js
+  // vendor/live-capture/csv.js
   var csv_exports = {};
   __export(csv_exports, {
     CSV_COLUMN_INDEX: () => CSV_COLUMN_INDEX,
@@ -3327,7 +3346,7 @@ ${config.codes.length} 個商品（${config.codes[0]}～${config.codes.at(-1)}�
     serializeCsvRow: () => serializeCsvRow
   });
 
-  // chat/vendor/live-capture/shout-history.js
+  // vendor/live-capture/shout-history.js
   var SHOUT_HISTORY_LIMIT = 3e4;
   var EMPTY_HISTORY_LENGTH = '{"v":1,"e":[]}'.length;
   var DECIMAL_ID = /^[0-9]+$/u;
@@ -3443,7 +3462,7 @@ ${config.codes.length} 個商品（${config.codes[0]}～${config.codes.at(-1)}�
     return JSON.stringify({ v: 1, p: historyPosition(item) });
   }
 
-  // chat/vendor/live-capture/aggregation.js
+  // vendor/live-capture/aggregation.js
   function buyerKey(item) {
     const uid = String(item?.uid ?? "").trim();
     return uid ? `uid:${uid}` : `username:${String(item?.username ?? "")}`;
@@ -3539,7 +3558,7 @@ ${config.codes.length} 個商品（${config.codes[0]}～${config.codes.at(-1)}�
     };
   }
 
-  // chat/vendor/live-capture/csv.js
+  // vendor/live-capture/csv.js
   var ORDER_HEADERS = [
     "擷取時間",
     "直播Session",
@@ -3794,7 +3813,7 @@ ${rows.map((row) => serializeCsvRow(rowFromInactiveComment(row))).join("\r\n")}`
     return `shopee-live-${safeSession}-${date}.csv`;
   }
 
-  // chat/src/entry-replay.mjs
+  // src/entry-replay.mjs
   var import_replay_core = __toESM(require_replay_core(), 1);
   var import_chat_runtime = __toESM(require_chat_runtime(), 1);
   var import_jambo_catalog = __toESM(require_jambo_catalog(), 1);
