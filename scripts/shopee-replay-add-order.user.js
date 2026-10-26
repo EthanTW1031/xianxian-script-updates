@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee 回放加單
 // @namespace    local.shopee.replay-add-order
-// @version      0.2.9
+// @version      0.2.10
 // @description  只讀聊聊回放加單，使用直播解析器，選 JAMBO 匯出檔讀商品清單，輸出獨立回放 CSV 與核對清單
 // @match        https://seller.shopee.tw/new-webchat/conversations*
 // @grant        GM_getValue
@@ -1182,7 +1182,7 @@ ${lines.join("\n")}`;
           place(r.left, r.top);
         });
         const replay = attribute === "data-replay-add-order";
-        const dock = createEthanToolDock({ id: replay ? "replay" : "precheck", label: replay ? "回放" : "預檢", name: replay ? "回放加單" : "帳號預檢", version: replay ? "0.2.9" : "0.4.7", order: replay ? 20 : 10, colour, panel, collapse: $("[data-collapse]") });
+        const dock = createEthanToolDock({ id: replay ? "replay" : "precheck", label: replay ? "回放" : "預檢", name: replay ? "回放加單" : "帳號預檢", version: replay ? "0.2.10" : "0.4.7", order: replay ? 20 : 10, colour, panel, collapse: $("[data-collapse]") });
         const show = (message, error = false) => {
           dock.status(error, "phase1");
           const target = $("[data-status]");
@@ -1234,7 +1234,7 @@ ${lines.join("\n")}`;
       var chat2 = require_chat_runtime();
       var { problem, safeMessage } = require_util();
       var { mountPanel, gmAdapter } = require_panel();
-      var VERSION = "0.2.9";
+      var VERSION = "0.2.10";
       var STORE = Object.freeze({ config: "replay:config:v1", panelPosition: "replay:panel-position:v1" });
       async function initReplay(core2, jambo2, onFormalSuccess = async () => {
       }) {
@@ -1753,80 +1753,129 @@ ${config.codes.length} 個商品（${config.codes[0]}～${config.codes.at(-1)}�
       "use strict";
       var { fail, id, cardSummary, classify } = require_buyer_types();
       var PATHS = { index: "/api/v3/order/search_order_list_index", cards: "/api/v3/order/get_order_list_card_list", detail: "/api/v3/order/get_one_order" };
-      var PACING = Object.freeze({ requestGapMs: 1e3, searchGapMs: 2e3, retryDelayMs: 3e3, minThrottleMs: 3e4 });
-      function createApi({ gmRequest, cookie = () => document.cookie, stop = () => false, now = () => Date.now(), sleep = (ms) => new Promise((r) => setTimeout(r, ms)), shopId, onShop = () => {
+      var PACING = Object.freeze({ gapMode: "afterResponse", minGapMs: 2e3, maxGapMs: 4e3, initialDelayMs: 2e3, retryDelayMs: 3e3, minThrottleMs: 3e4 });
+      var LIMITS = Object.freeze({ attemptMs: 12e5, requestMs: 15e3, requests: 250, pages: 25, indices: 1e3 });
+      async function waitStopped(ms, { stop = () => false, now = () => Date.now(), sleep = (ms2) => new Promise((r) => setTimeout(r, ms2)) } = {}) {
+        const until = now() + ms;
+        while (now() < until) {
+          if (stop()) fail("STOP", "已停止第二段");
+          await sleep(Math.min(100, until - now()));
+        }
+        if (stop()) fail("STOP", "已停止第二段");
+      }
+      function buyerUid(value) {
+        const key = id(value), number = Number(key);
+        if (!Number.isSafeInteger(number) || number <= 0 || String(number) !== key) fail("IDENTITY", "買家 UID 必須是無精度損失的正安全整數");
+        return { key, number };
+      }
+      function createApi({ gmRequest, cookie = () => document.cookie, stop = () => false, now = () => Date.now(), sleep = (ms) => new Promise((r) => setTimeout(r, ms)), random = Math.random, onTiming = () => {
+      }, shopId, onShop = () => {
       } }) {
-        let lastStart = -Infinity, lastSearchStart = -Infinity, expectedShop = shopId ? id(shopId) : null, deadline = Infinity;
+        let expectedShop = shopId ? id(shopId) : null, deadline = Infinity, lastEnd = null, nextAt = -Infinity, gapMs = 0, retryAt = -Infinity, inFlight = false;
+        const timingEvents = [];
+        let droppedTimingEvents = 0;
+        const timing = (event) => {
+          if (timingEvents.length < 1e4) timingEvents.push(event);
+          else droppedTimingEvents++;
+          try {
+            onTiming(event);
+          } catch {
+          }
+        };
+        async function waitUntil(until, limited = true) {
+          const target = limited ? Math.min(until, deadline) : until;
+          while (now() < target) {
+            if (stop()) fail("STOP", "已停止第二段");
+            await sleep(Math.min(100, target - now()));
+          }
+          if (stop()) fail("STOP", "已停止第二段");
+          if (limited && now() >= deadline) fail("LIMIT", "超過每位查詢時間上限");
+        }
         async function request(kind, body, orderId) {
           if (!Object.hasOwn(PATHS, kind)) fail("ENDPOINT", "只允許唯讀訂單查詢端點");
-          if (stop()) fail("STOP", "已停止第二段");
-          await sleep(Math.max(0, PACING.requestGapMs - (now() - lastStart), kind === "index" ? PACING.searchGapMs - (now() - lastSearchStart) : 0));
-          if (stop()) fail("STOP", "已停止第二段");
-          if (now() >= deadline) fail("LIMIT", "超過每位查詢時間上限");
-          lastStart = now();
-          if (kind === "index") lastSearchStart = lastStart;
-          const cds = cookie().split(";").map((s) => s.trim()).find((s) => s.startsWith("SPC_CDS="))?.slice(8);
-          if (!cds) fail("AUTH", "登入資料不完整，請重新登入後繼續查");
-          const url = new URL(PATHS[kind], "https://seller.shopee.tw");
-          url.searchParams.set("SPC_CDS", decodeURIComponent(cds));
-          url.searchParams.set("SPC_CDS_VER", "2");
-          if (orderId) url.searchParams.set("order_id", id(orderId));
-          return new Promise((resolve, reject) => {
-            let handle, timer, settled = false;
-            const done = (error2, data) => {
-              if (settled) return;
-              settled = true;
-              clearTimeout(timer);
-              clearInterval(poll);
-              error2 ? reject(error2) : resolve(data);
-            };
-            const error = (code, message) => Object.assign(new Error(message), { code });
-            const poll = setInterval(() => {
-              if (stop()) {
-                done(error("STOP", "已停止第二段"));
-                handle?.abort();
-              }
-            }, 50);
-            const budget = Math.min(15e3, deadline - now());
-            timer = setTimeout(() => {
-              done(error(budget < 15e3 ? "LIMIT" : "TIMEOUT", budget < 15e3 ? "超過每位查詢時間上限" : "訂單查詢逾時"));
-              handle?.abort();
-            }, budget);
-            try {
-              handle = gmRequest({ url: url.href, method: body ? "POST" : "GET", headers: { "Content-Type": "application/json" }, ...body ? { data: JSON.stringify(body) } : {}, onload: (r) => {
-                try {
-                  const final = new URL(r.finalUrl || url.href);
-                  if ([401, 403].includes(r.status) || final.origin !== url.origin || final.pathname !== url.pathname || /login|verify|captcha/iu.test(final.pathname)) throw error("AUTH", "登入失效，請重新登入後按繼續查");
-                  if (r.status === 429) {
-                    const retryAfter = /^retry-after\s*:\s*([^\r\n]+)/imu.exec(r.responseHeaders || "")?.[1]?.trim();
-                    let waitMs = PACING.minThrottleMs;
-                    if (retryAfter) {
-                      const seconds = Number(retryAfter), date = Date.parse(retryAfter);
-                      if (Number.isFinite(seconds) && seconds >= 0) waitMs = Math.max(waitMs, seconds * 1e3);
-                      else if (Number.isFinite(date)) waitMs = Math.max(waitMs, date - now());
-                    }
-                    throw Object.assign(error("THROTTLED", "蝦皮暫時限制查詢，已暫停；請冷卻後續查"), { retryAfterMs: waitMs });
-                  }
-                  if (r.status !== 200) throw error("HTTP", "訂單查詢 HTTP " + r.status);
-                  let v;
-                  try {
-                    v = JSON.parse(r.responseText);
-                  } catch {
-                    throw error("AUTH", "回應不是訂單資料，請確認登入或驗證頁");
-                  }
-                  if (v.code !== 0 || !v.data) throw error([401, 403].includes(v.code) ? "AUTH" : "API", "蝦皮訂單查詢未成功");
-                  done(null, v.data);
-                } catch (e) {
-                  done(e);
+          if (inFlight) fail("CONCURRENT", "訂單查詢不可並行");
+          inFlight = true;
+          try {
+            await waitUntil(Math.max(nextAt, retryAt));
+            const cds = cookie().split(";").map((s) => s.trim()).find((s) => s.startsWith("SPC_CDS="))?.slice(8);
+            if (!cds) fail("AUTH", "登入資料不完整，請重新登入後繼續查");
+            const url = new URL(PATHS[kind], "https://seller.shopee.tw");
+            url.searchParams.set("SPC_CDS", decodeURIComponent(cds));
+            url.searchParams.set("SPC_CDS_VER", "2");
+            if (orderId) url.searchParams.set("order_id", id(orderId));
+            const startedAt = now();
+            timing({ event: "start", kind, startedAt, previousCompletedAt: lastEnd, gapMs, retryAt: Number.isFinite(retryAt) ? retryAt : null });
+            return await new Promise((resolve, reject) => {
+              let handle, timer, poll, settled = false;
+              const error = (code, message) => Object.assign(new Error(message), { code });
+              const done = (err, data) => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timer);
+                clearInterval(poll);
+                lastEnd = now();
+                const sample = random();
+                if (!Number.isFinite(sample) || sample < 0 || sample >= 1) {
+                  reject(error("PACING_RANDOM", "查詢間隔亂數無效"));
+                  return;
                 }
-              }, onerror: () => done(error("NETWORK", "訂單查詢失敗")), ontimeout: () => done(error("TIMEOUT", "訂單查詢逾時")), onabort: () => done(error("STOP", "查詢已中止")) });
-            } catch (e) {
-              done(e);
-            }
-          });
+                gapMs = PACING.minGapMs + Math.floor(sample * (PACING.maxGapMs - PACING.minGapMs + 1));
+                nextAt = lastEnd + gapMs;
+                timing({ event: "complete", kind, startedAt, completedAt: lastEnd, nextGapMs: gapMs, reason: err?.code || null });
+                err ? reject(err) : resolve(data);
+              };
+              poll = setInterval(() => {
+                if (stop()) {
+                  done(error("STOP", "已停止第二段"));
+                  handle?.abort();
+                }
+              }, 50);
+              const budget = Math.min(LIMITS.requestMs, deadline - now());
+              timer = setTimeout(() => {
+                done(error(budget < LIMITS.requestMs ? "LIMIT" : "TIMEOUT", budget < LIMITS.requestMs ? "超過每位查詢時間上限" : "訂單查詢逾時"));
+                handle?.abort();
+              }, budget);
+              try {
+                handle = gmRequest({ url: url.href, method: body ? "POST" : "GET", headers: { "Content-Type": "application/json" }, ...body ? { data: JSON.stringify(body) } : {}, onload: (r) => {
+                  try {
+                    const final = new URL(r.finalUrl || url.href);
+                    if ([401, 403].includes(r.status) || final.origin !== url.origin || final.pathname !== url.pathname || /login|verify|captcha/iu.test(final.pathname)) throw error("AUTH", "登入失效，請重新登入後按繼續查");
+                    if (r.status === 429) {
+                      const retryAfter = /^retry-after\s*:\s*([^\r\n]+)/imu.exec(r.responseHeaders || "")?.[1]?.trim();
+                      let waitMs = PACING.minThrottleMs;
+                      if (retryAfter) {
+                        const seconds = Number(retryAfter), date = Date.parse(retryAfter);
+                        if (Number.isFinite(seconds) && seconds >= 0) waitMs = Math.max(waitMs, seconds * 1e3);
+                        else if (Number.isFinite(date)) waitMs = Math.max(waitMs, date - now());
+                      }
+                      throw Object.assign(error("THROTTLED", "蝦皮暫時限制查詢，已暫停；請冷卻後續查"), { retryAfterMs: waitMs });
+                    }
+                    if (r.status !== 200) throw error("HTTP", "訂單查詢 HTTP " + r.status);
+                    let v;
+                    try {
+                      v = JSON.parse(r.responseText);
+                    } catch {
+                      throw error("AUTH", "回應不是訂單資料，請確認登入或驗證頁");
+                    }
+                    if (v.code !== 0 || !v.data) throw error([401, 403].includes(v.code) ? "AUTH" : "API", "蝦皮訂單查詢未成功");
+                    done(null, v.data);
+                  } catch (e) {
+                    done(e);
+                  }
+                }, onerror: () => done(error("NETWORK", "訂單查詢失敗")), ontimeout: () => done(error("TIMEOUT", "訂單查詢逾時")), onabort: () => done(error("STOP", "查詢已中止")) });
+              } catch (e) {
+                done(e);
+              }
+            });
+          } finally {
+            inFlight = false;
+          }
         }
         return { request, setDeadline: (value) => {
           deadline = value;
+        }, getTimings: () => ({ events: timingEvents.map((e) => ({ ...e })), droppedEvents: droppedTimingEvents }), async waitRetry() {
+          retryAt = now() + PACING.retryDelayMs;
+          await waitUntil(retryAt, false);
         }, checkShop(value) {
           const s = id(value);
           if (expectedShop && s !== expectedShop) fail("SHOP_CHANGED", "賣場身分改變，停止查詢");
@@ -1836,19 +1885,18 @@ ${config.codes.length} 個商品（${config.codes[0]}～${config.codes.at(-1)}�
         }, getShop: () => expectedShop };
       }
       async function queryOnce(api, person, { stop = () => false, now = () => Date.now() } = {}) {
-        id(person.uid);
-        const started = now(), seen = /* @__PURE__ */ new Set(), cursors = /* @__PURE__ */ new Set(), matched = [], aliases = /* @__PURE__ */ new Set(), reasons = {};
-        api.setDeadline?.(started + 18e4);
+        const uid = buyerUid(person.uid), started = now(), seen = /* @__PURE__ */ new Set(), cursors = /* @__PURE__ */ new Set(), matched = [], aliases = /* @__PURE__ */ new Set(), reasons = {};
+        api.setDeadline?.(started + LIMITS.attemptMs);
         let requests = 0, count = 0, unattributedCards = 0, sentinel = null, knownTotal = null;
         async function call(kind, body, orderId) {
           if (stop()) fail("STOP", "已停止第二段");
-          if (++requests > 250 || now() - started >= 18e4) fail("LIMIT", "超過每位查詢上限");
+          if (++requests > LIMITS.requests || now() - started >= LIMITS.attemptMs) fail("LIMIT", "超過每位查詢上限");
           const v = await api.request(kind, body, orderId);
-          if (now() - started >= 18e4) fail("LIMIT", "超過每位查詢上限");
+          if (now() - started >= LIMITS.attemptMs) fail("LIMIT", "超過每位查詢上限");
           return v;
         }
-        for (let page = 1; page <= 25; page++) {
-          const data = await call("index", { order_list_tab: 100, entity_type: 1, pagination: { from_page_number: page - 1, page_number: page, page_size: 40, ...sentinel ? { page_sentinel: sentinel } : {} }, filter: { fulfillment_type: 0, is_drop_off: 0, fulfillment_source: 0, action_filter: 0 }, sort: { sort_type: 3, ascending: false }, search_param: { keyword: person.account, category: 2 } });
+        for (let page = 1; page <= LIMITS.pages; page++) {
+          const data = await call("index", { order_list_tab: 100, entity_type: 1, pagination: { from_page_number: page - 1, page_number: page, page_size: 40, ...sentinel ? { page_sentinel: sentinel } : {} }, filter: { fulfillment_type: 0, is_drop_off: 0, fulfillment_source: 0, action_filter: 0, buyer_user_id: uid.number }, sort: { sort_type: 3, ascending: false } });
           if (!Array.isArray(data.index_list) || data.index_list.length > 40 || !data.pagination || !Number.isSafeInteger(data.pagination.total) || data.pagination.total < 0) fail("INDEX_SCHEMA", "索引格式不完整");
           const total = data.pagination.total;
           if (knownTotal !== null && total !== knownTotal) fail("CHANGED", "查詢中訂單總數改變");
@@ -1858,7 +1906,7 @@ ${config.codes.length} 個商品（${config.codes[0]}～${config.codes.at(-1)}�
             fail("CURSOR", "回應頁碼不符且訂單尚未讀完");
           }
           count += data.index_list.length;
-          if (count > 1e3) fail("LIMIT", "超過索引上限");
+          if (count > LIMITS.indices) fail("LIMIT", "超過索引上限");
           const fresh = [];
           for (const index of data.index_list) {
             api.checkShop(index.shop_id);
@@ -1885,7 +1933,7 @@ ${config.codes.length} 個商品（${config.codes[0]}～${config.codes.at(-1)}�
                 unattributedCards++;
                 continue;
               }
-              if (c.uid !== person.uid) continue;
+              if (c.uid !== uid.key) fail("CARD_UID_MISMATCH", "UID 篩選傳回其他買家的訂單");
               matched.push(c);
               if (c.account) aliases.add(c.account);
             }
@@ -1897,13 +1945,13 @@ ${config.codes.length} 個商品（${config.codes[0]}～${config.codes.at(-1)}�
           if (!data.index_list.length || typeof next !== "string" || next === sentinel || cursors.has(next)) fail("CURSOR", "分頁游標無效");
           cursors.add(next);
           sentinel = next;
-          if (page === 25) fail("LIMIT", "超過頁數上限");
+          if (page === LIMITS.pages) fail("LIMIT", "超過頁數上限");
         }
         for (const c of matched.filter((c2) => c2.statuses.includes("不成立"))) {
           const d = await call("detail", null, c.orderId);
           if (id(d.order_id) !== c.orderId || api.checkShop(d.shop_id) !== api.getShop()) fail("DETAIL_ID", "訂單明細歸屬不符");
-          const uid = d.buyer_user?.user_id ?? d.buyer_user?.userid;
-          if (id(uid) !== person.uid) fail("DETAIL_UID", "明細買家不符");
+          const value = d.buyer_user?.user_id ?? d.buyer_user?.userid;
+          if (id(value) !== uid.key) fail("DETAIL_UID", "明細買家不符");
           if (!Number.isSafeInteger(d.cancel_reason_ext)) fail("CANCEL_REASON", "不成立原因缺漏");
           reasons[c.orderId] = d.cancel_reason_ext;
         }
@@ -1911,23 +1959,23 @@ ${config.codes.length} 個商品（${config.codes[0]}～${config.codes.at(-1)}�
       }
       async function queryBuyer(api, person, options = {}) {
         let last;
-        const sleep = options.sleep || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
         for (let attempt = 0; attempt < 2; attempt++) {
           try {
             const result = await queryOnce(api, person, options);
-            return { ...person, ...result, aliases: [.../* @__PURE__ */ new Set([...person.aliases || [], ...result.aliases])], queryFailed: false, checkedAt: (/* @__PURE__ */ new Date()).toISOString() };
+            return { ...person, uid: id(person.uid), ...result, aliases: [.../* @__PURE__ */ new Set([...person.aliases || [], ...result.aliases])], queryFailed: false, checkedAt: (/* @__PURE__ */ new Date()).toISOString() };
           } catch (e) {
             if (["AUTH", "STOP", "SHOP_CHANGED", "THROTTLED"].includes(e.code)) throw e;
             last = e;
             if (attempt === 0) {
-              await sleep(PACING.retryDelayMs);
+              if (api.waitRetry) await api.waitRetry();
+              else await waitStopped(PACING.retryDelayMs, options);
               if (options.stop?.()) fail("STOP", "第二段已停止，不再重試");
             }
           }
         }
         return { ...person, rawType: "new", queryFailed: true, failureReason: last.code || "QUERY_FAILED", complete: false, aliases: person.aliases || [], checkedAt: (/* @__PURE__ */ new Date()).toISOString() };
       }
-      module.exports = { PATHS, PACING, createApi, queryOnce, queryBuyer };
+      module.exports = { PATHS, PACING, LIMITS, buyerUid, waitStopped, createApi, queryOnce, queryBuyer };
     }
   });
 
@@ -1999,10 +2047,10 @@ ${config.codes.length} 個商品（${config.codes[0]}～${config.codes.at(-1)}�
     "src/buyer-phase.cjs"(exports, module) {
       "use strict";
       var { identities, digest, fail } = require_buyer_types();
-      var { createApi, queryBuyer, PACING } = require_buyer_orders();
+      var { createApi, queryBuyer, PACING, waitStopped } = require_buyer_orders();
       var { createCooldownStore, recordBuyerOutcome } = require_buyer_query_guard();
       var POLICY = 1;
-      var QUERY_VERSION = 3;
+      var QUERY_VERSION = 4;
       var LOCK = "shopee-buyer-orders-v1";
       function pageShopId() {
         if (typeof document === "undefined") return null;
@@ -2024,16 +2072,16 @@ ${config.codes.length} 個商品（${config.codes[0]}～${config.codes.at(-1)}�
         if (summary.unchecked) fail("PHASE1", "第一段仍有待查買家");
         const accepted = new Set(state.queue.items.filter((p) => ["found", "manualSent", "sent"].includes(core2.itemState(state.queue, saved.records, p))).map((p) => p.account));
         const source = identities(state.entry.text, accepted), records = state.queue.items.map((p) => [p.account, core2.itemState(state.queue, saved.records, p), saved.records[core2.recordKey(state.queue.batchId, p.account)] || null]);
-        return { ...source, shopId: pageShopId(), sourceHash: state.entry.hash, batchId: state.queue.batchId, sourceTool: "precheck", sourceVersion: "0.4.7", snapshotFingerprint: await digest(JSON.stringify([state.entry.hash, state.queue.batchId, records, source])) };
+        return { ...source, shopId: pageShopId(), sourceHash: state.entry.hash, batchId: state.queue.batchId, sourceTool: "precheck", sourceVersion: "0.4.8", snapshotFingerprint: await digest(JSON.stringify([state.entry.hash, state.queue.batchId, records, source])) };
       }
       async function replaySnapshot(state, core2) {
         if (state.running || state.stop || !state.result?.canExport) fail("PHASE1", "回放尚無正式可匯出結果");
         const csv = core2.ordersCsv(state.result), source = identities(csv);
-        return { ...source, shopId: pageShopId(), sourceHash: await digest(csv), batchId: state.config.sessionId, sourceTool: "replay", sourceVersion: "0.2.7", snapshotFingerprint: await digest(JSON.stringify([source, csv])) };
+        return { ...source, shopId: pageShopId(), sourceHash: await digest(csv), batchId: state.config.sessionId, sourceTool: "replay", sourceVersion: "0.2.10", snapshotFingerprint: await digest(JSON.stringify([source, csv])) };
       }
       function mountPhase({ ui: ui2, getSnapshot, gm, automatic }) {
         const box = document.createElement("section");
-        box.innerHTML = "<hr><strong>第二段：買家訂單分類</strong><p data-buyer-status>第一段完成後查詢；不操作聊聊。</p><button data-buyer-start>查詢／繼續查</button> <button data-buyer-requery>重新查第二段</button> <button data-buyer-stop>停止第二段</button> <button data-buyer-fallback>確實無法查詢，依規則採新客人</button> <button data-buyer-export>匯出買家類型名單</button>";
+        box.innerHTML = "<hr><strong>第二段：買家訂單分類</strong><p data-buyer-status>第一段完成後查詢；不操作聊聊。</p><button data-buyer-start>查詢／繼續查</button> <button data-buyer-requery>重新查第二段</button> <button data-buyer-stop>停止第二段</button> <button data-buyer-fallback>確實無法查詢，採用失敗處理</button> <button data-buyer-export>匯出買家類型名單</button>";
         ui2.$("[data-log]").before(box);
         const $ = (s) => box.querySelector(s), status = $("[data-buyer-status]");
         let running = false, stopped = false, result = null, binding = null, cache = null, cooldownStore = null;
@@ -2104,8 +2152,8 @@ ${config.codes.length} 個商品（${config.codes[0]}～${config.codes.at(-1)}�
                 if (cooldown?.untilMs > Date.now() && cooldown.failureReason) cache.pauseFailureReason = cooldown.failureReason;
                 if (!fallback && notBefore > Date.now()) fail("COOLDOWN", `蝦皮查詢冷卻中，請 ${Math.ceil((notBefore - Date.now()) / 1e3)} 秒後按繼續查；不會發出新請求。`);
                 if (!fallback && snap.people.some((p) => !cache.buyers.some((b) => b.account === p.account))) {
-                  show("慢速查詢：每次請求至少 1 秒，帳號搜尋至少 2 秒。");
-                  await new Promise((resolve) => setTimeout(resolve, PACING.searchGapMs));
+                  show("慢速查詢：每次請求完成後隨機等 2～4 秒；網路回應時間另計。失敗重查或限流冷卻會另依規則等待。");
+                  await waitStopped(PACING.initialDelayMs, { stop: () => stopped });
                 }
                 const api = createApi({ gmRequest: typeof GM_xmlhttpRequest === "function" ? GM_xmlhttpRequest : () => fail("GM_UNAVAILABLE", "需要篡改猴 GM_xmlhttpRequest"), stop: () => stopped, shopId: cache.shopId, onShop: (s) => {
                   cache.shopId = s;
@@ -2130,11 +2178,12 @@ ${config.codes.length} 個商品（${config.codes[0]}～${config.codes.at(-1)}�
                 }
                 if (stopped) fail("STOP", "第二段已停止");
                 await current();
-                result = { schemaVersion: 1, policyVersion: POLICY, queryVersion: QUERY_VERSION, queryPacing: PACING, shopId: cache.shopId, sourceSession: snap.sourceSession, sourceTool: snap.sourceTool, sourceVersion: snap.sourceVersion, sourceHash: snap.sourceHash, batchId: snap.batchId, snapshotFingerprint: snap.snapshotFingerprint, jobId: cache.jobId, startedAt: cache.startedAt, completedAt: (/* @__PURE__ */ new Date()).toISOString(), buyers: cache.buyers };
+                result = { schemaVersion: 1, policyVersion: POLICY, queryVersion: QUERY_VERSION, queryPacing: PACING, queryTiming: api.getTimings(), shopId: cache.shopId, sourceSession: snap.sourceSession, sourceTool: snap.sourceTool, sourceVersion: snap.sourceVersion, sourceHash: snap.sourceHash, batchId: snap.batchId, snapshotFingerprint: snap.snapshotFingerprint, jobId: cache.jobId, startedAt: cache.startedAt, completedAt: (/* @__PURE__ */ new Date()).toISOString(), buyers: cache.buyers };
                 ui2.setBadge?.({ phase: "phase2", outcome: "complete" });
                 const n = (t) => result.buyers.filter((b) => b.rawType === t).length;
                 show(`老客人 ${n("old")}、新客人 ${n("new")}（其中查詢失敗 ${result.buyers.filter((b) => b.queryFailed).length}）、上一筆還沒取貨 ${n("pending")}、曾逾期未取件 ${n("unclaimed")}
 已略過 UID 與帳號皆空的卡片 ${result.buyers.reduce((n2, b) => n2 + (b.unattributedCards || 0), 0)} 張（依每位查詢觀察次數加總）
+此為查詢分類；可配件數以控貨助手本期判定為準。
 曾逾期未取件：${result.buyers.filter((b) => b.rawType === "unclaimed").map((b) => b.account).join("、") || "無"}`);
               } catch (error) {
                 await persistPause(error);
@@ -2142,7 +2191,7 @@ ${config.codes.length} 個商品（${config.codes[0]}～${config.codes.at(-1)}�
               }
             });
           } catch (e) {
-            show(e.code === "AUTH" ? "登入失效：請重新登入後按「查詢／繼續查」。確實無法完成時才採新客人。" : e.message, true);
+            show(e.code === "AUTH" ? "登入失效：請重新登入後按「查詢／繼續查」。確實無法完成時才採用失敗處理。" : e.message, true);
           } finally {
             running = false;
             ui2.setBadge?.({ phase: "phase2", running: false });
@@ -2170,7 +2219,7 @@ ${config.codes.length} 個商品（${config.codes[0]}～${config.codes.at(-1)}�
           }
         });
         $("[data-buyer-fallback]").addEventListener("click", () => {
-          if (confirm("確定已嘗試恢復查詢仍無法完成？未查完者將列查詢失敗，採新客人8件；本期原有更嚴限制仍保留。")) work(true);
+          if (confirm("確定已嘗試恢復仍無法完成？未查完者將保留查詢失敗標記，由控貨助手依本期規則與歷史限制計算可配件數；已完成結果保留，既有限制不會放寬。")) work(true);
         });
         $("[data-buyer-export]").addEventListener("click", async () => {
           try {
