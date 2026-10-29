@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jambo 商品庫存
 // @namespace    https://jambolive.tv/
-// @version      2.1.5
+// @version      2.1.6
 // @description  獨立匯出含圖片、成本價與直購價的商品庫存及五欄商品清單 XLSX
 // @match        https://jambolive.tv/console/commodity/*
 // @require      https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js
@@ -728,7 +728,7 @@ function createEthanToolDock({id,label,name,version,order,colour,panel,collapse,
           throw new Error('展開期間商品名稱或樣式數已變動，請重新搜尋後再試');
         }
         try {
-          readModernInventoryRows(name);
+          readModernStockRows(name);
           if (!getModernInventoryExpandButton(name)) return;
         } catch (error) {
           if (error?.code !== 'INCOMPLETE_STYLES') throw error;
@@ -766,7 +766,7 @@ function createEthanToolDock({id,label,name,version,order,colour,panel,collapse,
         await waitForModernInventory(product);
         expandedCount += 1;
       } else {
-        readModernInventoryRows(name);
+        readModernStockRows(name);
       }
     }
     const current = getProductNames();
@@ -777,7 +777,7 @@ function createEthanToolDock({id,label,name,version,order,colour,panel,collapse,
           cleanText(name.querySelector('.jb-caption')?.textContent) !== product.styleCaption) {
         throw new Error('展開期間商品清單已變動，請重新搜尋後再試');
       }
-      readModernInventoryRows(name);
+      readModernStockRows(name);
     }
     return { expandedCount, expandableCount: expandedCount };
   }
@@ -876,44 +876,153 @@ function createEthanToolDock({id,label,name,version,order,colour,panel,collapse,
     return image?.getAttribute('data-jb-zoom') || image?.currentSrc || image?.src || '';
   }
 
-  function readModernInventoryRows(nameElement) {
+  function readCountText(element, name) {
+    const value = cleanText(element?.textContent);
+    if (!/^(?:[+-]?(?:\d+|\d{1,3}(?:,\d{3})+)|XX)$/iu.test(value)) {
+      throw new Error(`商品「${name}」庫存或已喊標數值無法辨識：${value || '空白'}`);
+    }
+    return value;
+  }
+
+  // 新版「總庫存/樣式」欄只有庫存；已喊標改在「銷售狀況」欄，要切換樣式下拉選單才看得到各樣式。
+  function readModernStockRows(nameElement) {
     const row = getModernProductRow(nameElement);
     const name = getProductName(nameElement);
     const stockCell = row?.querySelector(':scope > [data-label="總庫存/樣式"]');
-    const calledCell = row?.querySelector(':scope > [data-jb-col="sales-ordered"]');
-    if (!stockCell || !calledCell) throw new Error(`商品「${name}」缺少庫存或已喊標欄位；請在清單設定顯示這些欄位`);
-    const numberText = (element) => {
-      const value = cleanText(element?.textContent);
-      if (!/^(?:[+-]?(?:\d+|\d{1,3}(?:,\d{3})+)|XX)$/iu.test(value)) {
-        throw new Error(`商品「${name}」庫存或已喊標數值無法辨識：${value || '空白'}`);
-      }
-      return value;
-    };
-    const totalStock = numberText(stockCell.querySelector(':scope > .u-nowrap .u-font-semibold'));
-    const totalCalled = numberText(calledCell.querySelector(':scope > .u-nowrap .u-font-semibold'));
-    const stockLines = Array.from(stockCell.querySelectorAll(':scope > .jb-rowlines > div'));
-    const calledLines = Array.from(calledCell.querySelectorAll(':scope > .jb-rowlines > div'));
+    if (!stockCell) throw new Error(`商品「${name}」缺少總庫存/樣式欄位；請在清單設定顯示這個欄位`);
+    const totalStock = readCountText(stockCell.querySelector(':scope > .jb-rowcols > .jb-cell-total .jb-rowcols__num'), name);
+    const stockLines = Array.from(stockCell.querySelectorAll(':scope > .jb-rowcols > .jb-rowlines > div'));
     const caption = cleanText(nameElement.querySelector('.jb-caption')?.textContent);
     const expected = caption.match(/^(\d+)\s*個樣式$/u);
     if (caption && !expected) throw new Error(`商品「${name}」樣式數量標示無法辨識：${caption}`);
     const expectedCount = expected ? Number(expected[1]) : 0;
-    if (stockLines.length !== calledLines.length || stockLines.length !== expectedCount) {
-      const error = new Error(`商品「${name}」款式明細不完整（應有 ${expectedCount} 個，庫存 ${stockLines.length} 個，已喊標 ${calledLines.length} 個），請重新按「載入＋展開全部」`);
+    if (stockLines.length !== expectedCount) {
+      const error = new Error(`商品「${name}」款式明細不完整（應有 ${expectedCount} 個，庫存 ${stockLines.length} 個），請重新按「載入＋展開全部」`);
       error.code = 'INCOMPLETE_STYLES';
       throw error;
     }
-    const rows = [['全部', totalStock, totalCalled]];
+    const rows = [['全部', totalStock]];
     const styles = new Set();
-    stockLines.forEach((line, index) => {
+    for (const line of stockLines) {
       const style = cleanText(line.querySelector(':scope > [title]')?.textContent);
       if (!style || style === '全部' || styles.has(style)) throw new Error(`商品「${name}」樣式名稱缺漏或重複`);
       styles.add(style);
-      rows.push([style, numberText(line.lastElementChild), numberText(calledLines[index].querySelector('span'))]);
-    });
+      rows.push([style, readCountText(line.lastElementChild, name)]);
+    }
     return rows;
   }
 
-  function extractInventory() {
+  function readModernInventoryRows(nameElement, calledCounts) {
+    const name = getProductName(nameElement);
+    const id = cleanText(getModernProductRow(nameElement)?.querySelector(':scope > [data-jb-cell="head"]')?.textContent);
+    const counts = calledCounts.get(id);
+    return readModernStockRows(nameElement).map(([style, stock]) => {
+      if (!counts?.has(style)) throw new Error(`商品「${name}」樣式「${style}」的已喊標尚未讀取，請重新下載`);
+      return [style, stock, counts.get(style)];
+    });
+  }
+
+  function getModernSalesCell(nameElement) {
+    const cell = getModernProductRow(nameElement)?.querySelector(':scope > [data-jb-col="sales"]');
+    if (!cell) throw new Error(`商品「${getProductName(nameElement)}」缺少銷售狀況欄位；請在清單設定顯示這個欄位`);
+    return cell;
+  }
+
+  function getModernSalesStyleSelect(nameElement) {
+    const selects = getModernSalesCell(nameElement).querySelectorAll('select[aria-label="樣式"]');
+    if (selects.length !== 1) throw new Error(`商品「${getProductName(nameElement)}」銷售狀況的樣式選單不唯一，已停止`);
+    return selects[0];
+  }
+
+  function readModernCalledValue(nameElement) {
+    const name = getProductName(nameElement);
+    const values = Array.from(getModernSalesCell(nameElement).querySelectorAll('dl .jb-kv'))
+      .filter((kv) => cleanText(kv.querySelector('dt')?.textContent) === '已喊標');
+    if (values.length !== 1) throw new Error(`商品「${name}」找不到唯一的已喊標數字`);
+    return readCountText(values[0].querySelector('dd'), name);
+  }
+
+  async function selectModernSalesStyle(product, value, label, timeout = 3000) {
+    let name = findModernProductName(product.id);
+    if (!name) throw new Error('讀取已喊標期間商品清單已變動，請重新搜尋後再試');
+    const select = getModernSalesStyleSelect(name);
+    // React 控制的 select：要用原生 setter 改值再送 change，React 才會更新「已喊標」數字。
+    Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(select, value);
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+    const startedAt = Date.now();
+    do {
+      await delay(0);
+      name = findModernProductName(product.id);
+      const current = name && getModernSalesStyleSelect(name);
+      const shown = cleanText(current?.closest('.jb-select')?.querySelector('.jb-select__value')?.textContent);
+      if (current?.value === value && shown === label) {
+        await delay(0);
+        return findModernProductName(product.id);
+      }
+    } while (Date.now() - startedAt < timeout);
+    throw new Error(`商品「${product.name}」切換到樣式「${label}」逾時，請重新下載`);
+  }
+
+  async function readModernCalledCounts() {
+    const products = getProductNames().map((name) => ({
+      id: cleanText(getModernProductRow(name)?.querySelector(':scope > [data-jb-cell="head"]')?.textContent),
+      name: getProductName(name),
+    }));
+    const isPlainNumber = (value) => /^\d+$/u.test(value.replaceAll(',', ''));
+    const calledCounts = new Map();
+
+    for (const [index, product] of products.entries()) {
+      dock?.setBadge({running:true,done:index+1,total:products.length});
+      showStatus(`讀取已喊標：${index + 1}/${products.length}`);
+      let name = findModernProductName(product.id);
+      if (!name || getProductName(name) !== product.name) {
+        throw new Error('讀取已喊標期間商品清單已變動，請重新搜尋後再試');
+      }
+      const stockStyles = readModernStockRows(name).slice(1).map(([style]) => style);
+      const options = Array.from(getModernSalesStyleSelect(name).options).map((option) => ({
+        value: option.value,
+        label: cleanText(option.textContent),
+      }));
+      const [allOption, ...styleOptions] = options;
+      if (allOption?.value !== '' || allOption?.label !== '全部') {
+        throw new Error(`商品「${product.name}」銷售狀況的樣式選單第一項不是「全部」`);
+      }
+      const optionLabels = new Set(styleOptions.map((option) => option.label));
+      if (optionLabels.size !== styleOptions.length || optionLabels.size !== stockStyles.length ||
+          stockStyles.some((style) => !optionLabels.has(style))) {
+        throw new Error(`商品「${product.name}」銷售狀況的樣式和庫存樣式對不上，已停止`);
+      }
+
+      if (getModernSalesStyleSelect(name).value !== '') {
+        name = await selectModernSalesStyle(product, '', '全部');
+      }
+      const counts = new Map([['全部', readModernCalledValue(name)]]);
+      if (counts.get('全部') === '0') {
+        // 總數是 0 就不用逐一切換樣式。
+        for (const style of stockStyles) counts.set(style, '0');
+      } else {
+        try {
+          for (const option of styleOptions) {
+            name = await selectModernSalesStyle(product, option.value, option.label);
+            counts.set(option.label, readModernCalledValue(name));
+          }
+        } finally {
+          await selectModernSalesStyle(product, '', '全部');
+        }
+        const values = [...counts.values()];
+        if (values.every(isPlainNumber)) {
+          const sum = values.slice(1).reduce((total, value) => total + Number(value.replaceAll(',', '')), 0);
+          if (sum !== Number(values[0].replaceAll(',', ''))) {
+            throw new Error(`商品「${product.name}」各樣式已喊標加總 ${sum} 和總數 ${values[0]} 不同，請重新下載`);
+          }
+        }
+      }
+      calledCounts.set(product.id, counts);
+    }
+    return calledCounts;
+  }
+
+  function extractInventory(calledCounts = new Map()) {
     const outputRows = [];
     const productGroups = [];
     const catalogProducts = [];
@@ -925,7 +1034,7 @@ function createEthanToolDock({id,label,name,version,order,colour,panel,collapse,
       const modernRow = getModernProductRow(nameElement);
       const inventoryTable = findInventoryTable(nameElement);
 
-      const dataRows = modernRow ? readModernInventoryRows(nameElement) : inventoryTable
+      const dataRows = modernRow ? readModernInventoryRows(nameElement, calledCounts) : inventoryTable
         ? Array.from(inventoryTable.querySelectorAll('tbody tr'))
             .map((row) =>
               getDirectCells(row, 'TD').map((cell) =>
@@ -1063,8 +1172,8 @@ function createEthanToolDock({id,label,name,version,order,colour,panel,collapse,
     statusElement.style.color = isError ? '#b42318' : '#067647';
   }
 
-  function collectOrWarn() {
-    const result = extractInventory();
+  function collectOrWarn(calledCounts) {
+    const result = extractInventory(calledCounts);
     if (result.outputRows.length === 0) {
       showStatus(
         '沒有找到商品資料；請等頁面顯示「載入完成」後再試。',
@@ -1555,7 +1664,8 @@ function createEthanToolDock({id,label,name,version,order,colour,panel,collapse,
     try {
       const loadResult = await loadAllProducts();
       const expandResult = await expandAllProducts();
-      const result = collectOrWarn();
+      const calledCounts = getModernTable() ? await readModernCalledCounts() : new Map();
+      const result = collectOrWarn(calledCounts);
       if (!result) return;
 
       const xlsx = await buildXlsx(result);
@@ -1693,7 +1803,7 @@ function createEthanToolDock({id,label,name,version,order,colour,panel,collapse,
     let clampPanelPosition = () => {};
 
     document.body.appendChild(panel);
-    dock=createEthanToolDock({id:"jambo-stock",label:"庫存",name:"Jambo 商品庫存",version:"2.1.5",order:20,colour:"#1d4ed8",panel,collapse:toggleButton});
+    dock=createEthanToolDock({id:"jambo-stock",label:"庫存",name:"Jambo 商品庫存",version:"2.1.6",order:20,colour:"#1d4ed8",panel,collapse:toggleButton});
     clampPanelPosition = makePanelDraggable(
       panel,
       titleBar,

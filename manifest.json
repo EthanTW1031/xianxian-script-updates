@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "publishedAt": "2026-10-26T12:36:00.926Z",
+  "publishedAt": "2026-10-29T11:14:20.645Z",
   "scripts": [
     {
       "id": "fb-inbox-finder",
@@ -46,11 +46,11 @@
       "id": "jambo-stock",
       "name": "Jambo 商品庫存",
       "namespace": "https://jambolive.tv/",
-      "version": "2.1.5",
+      "version": "2.1.6",
       "file": "scripts/jambo-stock.user.js",
-      "sha256": "8245414fcc09a963af4203f7389e601cf2455ba17338237b4c7ce1f8f726332d",
-      "bytes": 60396,
-      "updatedAt": "2026-10-24T08:35:17.084Z"
+      "sha256": "67dc2e6fd01ab873af4eb5a5ae3092a3958e661257f714d2b7aee224604b9797",
+      "bytes": 66023,
+      "updatedAt": "2026-10-29T11:14:20.645Z"
     },
     {
       "id": "shopee-account-precheck",
