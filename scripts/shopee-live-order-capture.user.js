@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee Live Order Capture
 // @namespace    https://github.com/EthanTW1031/Shopee
-// @version      0.5.0
+// @version      0.6.0
 // @description  擷取蝦皮官方 PC 主播後台的直播留言並在本機整理喊單資料
 // @author       EthanTW1031
 // @match        https://live.shopee.tw/pc/live*
@@ -31,6 +31,11 @@
   var DOM_SCAN_DELAY_MS = 100;
   var DOM_STABILITY_DELAY_MS = 50;
   var DOM_STATUS_INTERVAL_MS = 1e3;
+  var COMMENT_STATE_INTERVAL_MS = 200;
+  var COMMENT_STATE_RETRY_MS = 1e3;
+  var COMMENT_STATE_DOM_WAIT_MS = 2e3;
+  var COMMENT_CAPTURE_RETRY_DELAYS_MS = Object.freeze([1e3, 2e3, 5e3]);
+  var COMMENT_CAPTURE_ERROR_REPEAT_MS = 5e3;
   var URL_POLL_INTERVAL_MS = 1e3;
   var LOCK_HEARTBEAT_MS = 3e3;
   var LOCK_STALE_MS = 1e4;
@@ -1608,6 +1613,9 @@
       Boolean(snapshot.isHost)
     ]);
   }
+  function captureMetadata(options) {
+    return options.captureSource === "state" || options.captureSource === "dom" ? { captureSource: options.captureSource, domObserved: options.domObserved === true } : null;
+  }
   function commentKey(snapshot, firstSeenAt) {
     if (snapshot.commentId) return snapshot.commentId;
     return [
@@ -1710,6 +1718,7 @@
       });
       this.onCommit = options.onCommit ?? (() => {
       });
+      this.captureCommitIds = options.captureCommitIds === true;
       this.requireCatalog = options.requireCatalog === true;
       this.runtimes = /* @__PURE__ */ new Map();
     }
@@ -1947,6 +1956,11 @@
         dirtyCount: pendingQueueCount(runtime)
       };
     }
+    // First-sighting capture only needs config; avoid cloning the whole catalog,
+    // recent ring and summary for every message in a burst. Callers snapshot it.
+    getCaptureConfig(sessionId) {
+      return this.getRuntime(sessionId)?.session?.config;
+    }
     async recordCapture(sessionId, snapshot, context, options = {}) {
       let runtime = this.getRuntime(sessionId);
       if (!runtime) {
@@ -2013,6 +2027,7 @@
       const firstSeenAt = nowIso(context.firstSeenAt);
       const captureSequence = runtime.nextPendingCaptureSequence;
       runtime.nextPendingCaptureSequence += 1;
+      const metadata = captureMetadata(options);
       const comment = {
         sessionId: runtime.sessionId,
         commentId: key,
@@ -2029,7 +2044,8 @@
         activationSequenceAtFirstSeen: context.activationSequenceAtFirstSeen ?? 0,
         classification: result.classification,
         isHost: snapshot.isHost === true,
-        domAnomaly: false
+        domAnomaly: false,
+        ...metadata
       };
       const parsedItems = result.items ?? (result.item ? [result.item] : []);
       const items = parsedItems.map((parsedItem, itemIndex) => {
@@ -2063,7 +2079,8 @@
           profileRevision: parsedItem.profileRevision ?? null,
           productName: productNameForParsedItem(parsedItem, context, productMetadata),
           price: priceForParsedItem(parsedItem, context, productMetadata),
-          captureOrigin
+          captureOrigin,
+          ...metadata
         };
       });
       const delta = counterDelta(result.classification);
@@ -2131,7 +2148,13 @@
           runtime.constraintFailures = 0;
           runtime.constraintRebuilds = 0;
           runtime.state = "ready";
-          this.onCommit(runtime.sessionId, saved.revision);
+          if (this.captureCommitIds) {
+            this.onCommit(
+              runtime.sessionId,
+              saved.revision,
+              batch.filter((entry) => entry.type === "insert").map((entry) => entry.comment.commentId)
+            );
+          } else this.onCommit(runtime.sessionId, saved.revision);
         } catch (error) {
           if (runtime.generation !== batch[0]?.generation || !this.isOwner(runtime.sessionId, runtime.generation)) {
             runtime.state = "readonly";
@@ -3311,6 +3334,8 @@ ${rows.map((row) => serializeCsvRow(rowFromInactiveComment(row))).join("\r\n")}`
       });
       this.onStatus = options.onStatus ?? (() => {
       });
+      this.onMutation = options.onMutation ?? (() => {
+      });
       this.scanDelayMs = options.scanDelayMs ?? DOM_SCAN_DELAY_MS;
       this.stabilityDelayMs = options.stabilityDelayMs ?? DOM_STABILITY_DELAY_MS;
       this.statusIntervalMs = options.statusIntervalMs ?? DOM_STATUS_INTERVAL_MS;
@@ -3326,6 +3351,7 @@ ${rows.map((row) => serializeCsvRow(rowFromInactiveComment(row))).join("\r\n")}`
       if (!root) return;
       this.observer = new this.window.MutationObserver((records) => {
         const rows = /* @__PURE__ */ new Set();
+        let commentChanged = false;
         for (const record of records) {
           if (record.type === "childList") {
             for (const node of record.addedNodes) {
@@ -3335,8 +3361,10 @@ ${rows.map((row) => serializeCsvRow(rowFromInactiveComment(row))).join("\r\n")}`
           const targetElement = record.target?.nodeType === 1 ? record.target : record.target?.parentElement;
           const closest = targetElement?.closest?.(COMMENT_ROW_SELECTOR);
           if (closest) rows.add(closest);
+          if (targetElement?.closest?.(COMMENT_HOST_SELECTOR)) commentChanged = true;
         }
         this.readRows([...rows], CAPTURE_ORIGINS.OBSERVER, false);
+        if (rows.size || commentChanged) this.onMutation();
         this.scheduleScan();
       });
       this.observer.observe(root, {
@@ -3433,6 +3461,674 @@ ${rows.map((row) => serializeCsvRow(rowFromInactiveComment(row))).join("\r\n")}`
       }
       if (!isFullScan && this.pending.size) this.scheduleScan();
       return seenIds;
+    }
+  };
+
+  // src/comment-state.js
+  var MAX_DEPTH = 128;
+  var MAX_NODES = 2e4;
+  var MAX_HOOKS = 128;
+  var own = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
+  var positiveId = (value) => Number.isSafeInteger(value) && value > 0;
+  function committedPath(node, cache) {
+    const keys = Object.getOwnPropertyNames(node).filter((key) => key.startsWith("__reactInternalInstance$") || key.startsWith("__reactFiber$"));
+    if (keys.length !== 1) return null;
+    let root = node[keys[0]];
+    const parents = /* @__PURE__ */ new Set();
+    while (root?.return) {
+      if (parents.has(root) || parents.size >= MAX_DEPTH) return null;
+      parents.add(root);
+      root = root.return;
+    }
+    const rootState = root?.stateNode;
+    const current = rootState?.current;
+    if (!current || current.stateNode !== rootState) return null;
+    if (cache.rootState === rootState && cache.route) {
+      const path = [current];
+      let cursor = current;
+      let steps = 0;
+      for (const index of cache.route) {
+        cursor = cursor?.child;
+        for (let skip = 0; cursor && skip < index; skip += 1) {
+          cursor = cursor.sibling;
+          if (++steps > MAX_NODES) return null;
+        }
+        if (!cursor) break;
+        path.push(cursor);
+      }
+      if (path.length === cache.route.length + 1 && cursor?.stateNode === node) return path;
+    }
+    const stack = [{ fiber: current, path: [current], route: [] }];
+    const visited = /* @__PURE__ */ new Set();
+    while (stack.length && visited.size < MAX_NODES) {
+      const entry = stack.pop();
+      if (!entry.fiber || visited.has(entry.fiber)) continue;
+      visited.add(entry.fiber);
+      if (entry.fiber.stateNode === node) {
+        cache.rootState = rootState;
+        cache.route = entry.route;
+        return entry.path;
+      }
+      if (entry.path.length >= MAX_DEPTH) continue;
+      let child = entry.fiber.child;
+      const siblings = /* @__PURE__ */ new Set();
+      let index = 0;
+      while (child && !siblings.has(child) && siblings.size < MAX_NODES) {
+        if (stack.length + visited.size >= MAX_NODES) return null;
+        siblings.add(child);
+        stack.push({ fiber: child, path: [...entry.path, child], route: [...entry.route, index] });
+        child = child.sibling;
+        index += 1;
+      }
+    }
+    return null;
+  }
+  function listShape(array) {
+    return array.some((item) => item && typeof item === "object" && own(item, "id") && (item.isNormalUser === true || item.isAnnounce === true || item.isHost === true));
+  }
+  var CommentStateLocator = class {
+    constructor(documentObject) {
+      this.document = documentObject;
+      this.pathCache = {};
+      this.trusted = null;
+      this.identity = null;
+    }
+    locate() {
+      try {
+        const lists = this.document.querySelectorAll(".ReactVirtualized__List");
+        if (lists.length !== 1) return { available: false, reason: "\u7559\u8A00\u5BB9\u5668\u7121\u6CD5\u552F\u4E00\u8FA8\u8B58" };
+        const node = lists[0];
+        if (!node.isConnected) return { available: false, reason: "\u7559\u8A00\u5BB9\u5668\u5DF2\u96E2\u958B\u9801\u9762" };
+        const path = committedPath(node, this.pathCache);
+        if (!path) return { available: false, reason: "\u7121\u6CD5\u78BA\u8A8D\u76EE\u524D\u7559\u8A00\u5143\u4EF6" };
+        const matches = [];
+        for (const fiber of path.slice(-41).reverse()) {
+          if (typeof fiber.memoizedProps?.onReceiveWsMessage !== "function" || typeof fiber.type !== "function") continue;
+          let hook = fiber.memoizedState;
+          const visited = /* @__PURE__ */ new Set();
+          let index = 0;
+          while (hook) {
+            if (visited.has(hook) || index >= MAX_HOOKS) {
+              return { available: false, reason: "\u7559\u8A00 hook \u7D50\u69CB\u7570\u5E38" };
+            }
+            visited.add(hook);
+            const value = hook.memoizedState;
+            if (Array.isArray(value)) {
+              const trusted = this.trusted?.index === index && (this.trusted.owner === fiber || this.trusted.owner === fiber.alternate) && this.trusted.node === node;
+              if (value.length && listShape(value) || !value.length && trusted) {
+                matches.push({ array: value, owner: fiber, index, node });
+              }
+            }
+            hook = hook.next;
+            index += 1;
+          }
+        }
+        if (matches.length !== 1) return { available: false, reason: "\u7559\u8A00\u6E05\u55AE\u7121\u6CD5\u552F\u4E00\u8FA8\u8B58" };
+        const match = matches[0];
+        const visible = [...node.querySelectorAll("[data-comment-id]")].map((row) => row.getAttribute("data-comment-id")).filter((id) => id && id !== "false");
+        if (visible.length && match.array.length) {
+          const visibleIds = new Set(visible);
+          const anchor = this.pathCache.anchor;
+          let matched = anchor?.node === node && match.array[anchor.index] != null && visibleIds.has(String(match.array[anchor.index].id));
+          for (let index = match.array.length - 1; index >= 0 && !matched; index -= 1) {
+            const item = match.array[index];
+            matched = item != null && own(item, "id") && visibleIds.has(String(item.id));
+            if (matched) this.pathCache.anchor = { node, index };
+          }
+          if (!matched) {
+            return { available: false, reason: "\u6E05\u55AE\u8207\u756B\u9762\u7559\u8A00\u7121\u6CD5\u5C0D\u7167" };
+          }
+        }
+        const sameOwner = this.trusted?.node === node && this.trusted.index === match.index && (this.trusted.owner === match.owner || this.trusted.owner === match.owner.alternate);
+        if (!sameOwner) this.identity = {};
+        this.trusted = { node, owner: match.owner, index: match.index };
+        return { available: true, array: match.array, node, identity: this.identity };
+      } catch {
+        return { available: false, reason: "\u7559\u8A00\u6E05\u55AE\u7D50\u69CB\u5DF2\u6539\u8B8A" };
+      }
+    }
+  };
+  function escapeText(text) {
+    return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
+  }
+  function replacePlaceholder(text, key, replacement) {
+    const index = text.indexOf(key);
+    if (index < 0) return text;
+    for (const entity of text.matchAll(/&(?:amp|lt|gt|quot|#039);/g)) {
+      if (index < entity.index + entity[0].length && index + key.length > entity.index) {
+        throw new Error("\u5360\u4F4D\u7B26\u8207\u6587\u5B57\u8DF3\u812B\u91CD\u758A");
+      }
+    }
+    return text.slice(0, index) + replacement + text.slice(index + key.length);
+  }
+  function displayedCommentText(content) {
+    let text;
+    if (typeof content === "string") {
+      if (/[<>&]/u.test(content)) throw new Error("\u5B57\u4E32\u5167\u5BB9\u9700\u756B\u9762\u6838\u5C0D");
+      text = content;
+    } else {
+      if (!content || typeof content.content !== "string") throw new Error("\u7559\u8A00\u6587\u5B57\u4E0D\u5B8C\u6574");
+      text = escapeText(content.content);
+      const placeholders = content.extra_info?.place_holders;
+      if (content.content_v2 && placeholders) {
+        if (typeof content.content_v2 !== "string" || !Array.isArray(placeholders)) {
+          throw new Error("\u63D0\u53CA\u7D50\u69CB\u4E0D\u652F\u63F4");
+        }
+        text = escapeText(content.content_v2);
+        for (const placeholder of placeholders) {
+          if (!placeholder || typeof placeholder.key !== "string" || !placeholder.key || /[<>&$]/u.test(placeholder.key)) throw new Error("\u5360\u4F4D\u7B26\u4E0D\u652F\u63F4");
+          if (placeholder.type === 1) {
+            if (typeof placeholder.value !== "string" || /[<>&$]/u.test(placeholder.value)) {
+              throw new Error("\u63D0\u53CA\u540D\u7A31\u9700\u756B\u9762\u6838\u5C0D");
+            }
+            text = replacePlaceholder(text, placeholder.key, `@${placeholder.value}`);
+          } else if (placeholder.type === 2) {
+            text = replacePlaceholder(text, placeholder.key, "");
+          } else throw new Error("\u5360\u4F4D\u7B26\u985E\u578B\u4E0D\u652F\u63F4");
+        }
+      }
+      text = text.replace(/&(amp|lt|gt|quot|#039);/g, (_, key) => ({ amp: "&", lt: "<", gt: ">", quot: '"', "#039": "'" })[key]);
+    }
+    return text.replace(/\r\n?/g, "\n").replace(/\0/g, "").trim();
+  }
+  function stateItemKind(item) {
+    if (!item || typeof item !== "object") return "unknown";
+    if (item.isAiReply || item.isAnnounce || item.isHighLight || item.isPurchase) return "excluded";
+    if (item.isHost === true && item.isPosted === false) return "excluded";
+    if (item.isAskHost) {
+      return item.itemId !== 0 && (item.shopId !== 0 || item.isFood) ? "excluded" : "domOnly";
+    }
+    if (item.isHost === true || item.isNormalUser === true) return "capture";
+    return "unknown";
+  }
+  function holderFingerprint(content) {
+    const holders = content && typeof content === "object" ? content.extra_info?.place_holders : null;
+    if (Array.isArray(holders)) {
+      if (holders.length > 128) throw new Error("\u5360\u4F4D\u7B26\u904E\u591A");
+      const primitive = (value) => ["string", "number", "boolean"].includes(typeof value) ? value : null;
+      return JSON.stringify(holders.map((entry) => [primitive(entry?.key), primitive(entry?.value), primitive(entry?.type)]));
+    }
+    return holders == null ? null : typeof holders;
+  }
+  function sameInputs(item, kind, previous) {
+    if (!previous || previous.kind !== kind) return false;
+    if (kind !== "capture") return true;
+    const content = item.content;
+    return previous.user === item.user && previous.uid === item.uid && previous.host === (item.isHost === true) && previous.contentType === typeof content && previous.base === (typeof content === "string" ? content : content?.content) && previous.v2 === content?.content_v2 && previous.holders === holderFingerprint(content);
+  }
+  function inputs(item, kind) {
+    if (kind !== "capture") return { kind };
+    const content = item.content;
+    return {
+      kind,
+      user: item.user,
+      uid: item.uid,
+      host: item.isHost === true,
+      contentType: typeof content,
+      base: typeof content === "string" ? content : content?.content,
+      v2: content?.content_v2,
+      holders: holderFingerprint(content)
+    };
+  }
+  function cacheKey(id) {
+    if (typeof id === "number") return Number.isSafeInteger(id) ? id : String(id);
+    if (typeof id !== "string") return null;
+    const number = Number(id);
+    return Number.isSafeInteger(number) && String(number) === id ? number : id;
+  }
+  function projectStateItem(item) {
+    const kind = stateItemKind(item);
+    const id = typeof item?.id === "number" || typeof item?.id === "string" ? String(item.id) : null;
+    if (kind === "excluded") return { kind, id };
+    if (kind !== "capture") return { kind, id, reason: "\u7559\u8A00\u985E\u578B\u9700\u756B\u9762\u6838\u5C0D" };
+    if (!positiveId(item.id)) return { kind: "error", id, reason: "\u7559\u8A00 ID \u4E0D\u662F\u6B63\u5B89\u5168\u6574\u6578" };
+    try {
+      if (item.user != null && typeof item.user !== "string") throw new Error("\u5E33\u865F\u578B\u614B\u4E0D\u652F\u63F4");
+      if (item.uid != null && !["string", "number"].includes(typeof item.uid)) {
+        throw new Error("UID \u578B\u614B\u4E0D\u652F\u63F4");
+      }
+      if (typeof item.uid === "number" && !Number.isSafeInteger(item.uid)) {
+        throw new Error("UID \u7CBE\u5EA6\u4E0D\u8DB3");
+      }
+      const username = String(item.user ?? "").trim();
+      const rawMessage = displayedCommentText(item.content);
+      const snapshot = {
+        commentId: id,
+        uid: String(item.uid ?? ""),
+        username,
+        rawMessage,
+        isHost: item.isHost === true,
+        complete: Boolean(username && rawMessage)
+      };
+      if (!snapshot.complete) return { kind: "error", id, reason: "\u7559\u8A00\u6B04\u4F4D\u5C1A\u672A\u5B8C\u6574" };
+      return { kind: "capture", id, snapshot };
+    } catch (error) {
+      return { kind: "error", id, reason: error.message };
+    }
+  }
+  function commentSignature(snapshot) {
+    return JSON.stringify([snapshot.username, snapshot.rawMessage, Boolean(snapshot.isHost)]);
+  }
+  var CommentStateReader = class {
+    constructor(documentObject, options = {}) {
+      this.locator = options.locator ?? new CommentStateLocator(documentObject);
+      this.previousArray = null;
+      this.available = false;
+      this.generation = 0;
+      this.cache = /* @__PURE__ */ new Map();
+      this.byIndex = [];
+      this.pendingIndices = /* @__PURE__ */ new Set();
+      this.previousIdentity = null;
+      this.measure = options.measure === true;
+      this.clock = options.clock ?? (() => performance.now());
+    }
+    get(id) {
+      const entry = this.cache.get(cacheKey(id));
+      return entry?.generation === this.generation ? entry.result : null;
+    }
+    originFor(id) {
+      const entry = this.cache.get(cacheKey(id));
+      return entry?.generation === this.generation ? entry.origin : null;
+    }
+    read() {
+      const started = this.measure ? this.clock() : 0;
+      const found = this.locator.locate();
+      const located = this.measure ? this.clock() : 0;
+      if (!found.available) {
+        this.available = false;
+        return { ...found, events: [], observations: [], issues: [] };
+      }
+      const baseline = !this.available || found.identity !== this.previousIdentity;
+      const changed = baseline || found.array !== this.previousArray;
+      this.available = true;
+      const events = [];
+      const observations = [];
+      const issues = [];
+      let convertMs = 0;
+      if (changed) this.generation += 1;
+      const indices = changed ? null : [...this.pendingIndices];
+      if (changed) this.pendingIndices.clear();
+      const length = indices ? indices.length : found.array.length;
+      for (let offset = 0; offset < length; offset += 1) {
+        const index = indices ? indices[offset] : offset;
+        const item = found.array[index];
+        const key = cacheKey(item?.id);
+        const kind = stateItemKind(item);
+        const indexed = this.byIndex[index];
+        const previous = key == null ? null : indexed?.key === key ? indexed : this.cache.get(key);
+        let same = false;
+        try {
+          same = sameInputs(item, kind, previous?.raw);
+        } catch {
+        }
+        if (same && !baseline && !indices && (previous.result.kind === "capture" || previous.result.kind === "excluded")) {
+          previous.generation = this.generation;
+          this.byIndex[index] = previous;
+          continue;
+        }
+        let result;
+        const convertStarted = this.measure && !same ? this.clock() : 0;
+        try {
+          result = same ? previous.result : projectStateItem(item);
+        } catch {
+          result = { kind: "error", id: key == null ? null : String(key), reason: "\u7559\u8A00\u6B04\u4F4D\u7D50\u69CB\u7570\u5E38" };
+        }
+        if (this.measure && !same) convertMs += this.clock() - convertStarted;
+        const origin = baseline ? CAPTURE_ORIGINS.INITIAL_SCAN : previous?.origin ?? CAPTURE_ORIGINS.OBSERVER;
+        if (key != null) {
+          if (same) {
+            previous.generation = this.generation;
+            previous.origin = origin;
+            this.byIndex[index] = previous;
+          } else {
+            let raw;
+            try {
+              raw = inputs(item, kind);
+            } catch {
+              raw = null;
+            }
+            const saved = { key, raw, result, origin, generation: this.generation };
+            this.cache.set(key, saved);
+            this.byIndex[index] = saved;
+          }
+        } else this.byIndex[index] = null;
+        if (result.kind === "capture") {
+          this.pendingIndices.delete(index);
+          if (!same || baseline || indices) events.push({ snapshot: result.snapshot, captureOrigin: origin });
+        } else if (result.kind !== "excluded") {
+          this.pendingIndices.add(index);
+          issues.push({ id: result.id, reason: result.reason });
+          if (kind === "capture" && positiveId(item?.id) && (!previous || baseline)) {
+            observations.push({
+              captureOrigin: origin,
+              snapshot: {
+                commentId: String(item.id),
+                uid: ["string", "number"].includes(typeof item.uid) ? String(item.uid) : "",
+                username: typeof item.user === "string" ? item.user.trim() : "",
+                rawMessage: "",
+                isHost: item.isHost === true,
+                complete: false
+              }
+            });
+          }
+        } else this.pendingIndices.delete(index);
+      }
+      this.previousArray = found.array;
+      if (changed) this.byIndex.length = found.array.length;
+      this.previousIdentity = found.identity;
+      const totalMs = this.measure ? this.clock() - started : 0;
+      return {
+        available: true,
+        baseline,
+        changed,
+        events,
+        observations,
+        issues,
+        node: found.node,
+        timings: this.measure ? {
+          locateMs: located - started,
+          convertMs,
+          diffMs: Math.max(0, totalMs - (located - started) - convertMs),
+          totalMs
+        } : null
+      };
+    }
+  };
+
+  // src/comment-capture.js
+  function plainSnapshot(snapshot) {
+    return {
+      commentId: snapshot.commentId,
+      uid: snapshot.uid,
+      username: snapshot.username,
+      rawMessage: snapshot.rawMessage,
+      isHost: Boolean(snapshot.isHost),
+      complete: snapshot.complete
+    };
+  }
+  function captureOriginFor(entry, origin) {
+    return entry.domOrigin === CAPTURE_ORIGINS.OBSERVER ? CAPTURE_ORIGINS.OBSERVER : origin;
+  }
+  function excludedDomSnapshot(snapshot) {
+    const row = snapshot.row;
+    return row?.getAttribute("data-is-ai-reply") === "true" || Boolean(row?.querySelector('[class*="ai-icon_"]')) || Boolean(row?.querySelector('[class*="ask-msg-container_"]')) || row?.getAttribute("data-no-impression") === "true";
+  }
+  var CommentCaptureCoordinator = class {
+    constructor(documentObject, options = {}) {
+      this.document = documentObject;
+      this.window = documentObject.defaultView;
+      this.onCandidate = options.onCandidate ?? (() => ({ inserted: false, anomaly: false }));
+      this.onStatus = options.onStatus ?? (() => {
+      });
+      this.onError = options.onError ?? (() => {
+      });
+      this.onForget = options.onForget ?? (() => {
+      });
+      this.now = options.now ?? (() => this.window.performance.now());
+      this.wallNow = options.wallNow ?? (() => Date.now());
+      this.reader = options.reader ?? new CommentStateReader(documentObject);
+      this.intervalMs = options.intervalMs ?? COMMENT_STATE_INTERVAL_MS;
+      this.retryMs = options.retryMs ?? COMMENT_STATE_RETRY_MS;
+      this.waitMs = options.waitMs ?? COMMENT_STATE_DOM_WAIT_MS;
+      this.running = false;
+      this.reading = false;
+      this.stateAvailable = false;
+      this.reason = "";
+      this.nextLocate = 0;
+      this.entries = /* @__PURE__ */ new Map();
+      this.pending = /* @__PURE__ */ new Set();
+      this.domSeen = /* @__PURE__ */ new Set();
+      this.committed = /* @__PURE__ */ new Set();
+      this.insertions = /* @__PURE__ */ new Map();
+      this.counted = /* @__PURE__ */ new Set();
+      this.stateCommitted = /* @__PURE__ */ new Set();
+      this.stateOnly = 0;
+      this.domFallback = 0;
+      this.anomalies = /* @__PURE__ */ new Set();
+      this.faults = /* @__PURE__ */ new Set();
+      this.orderUncertain = false;
+      this.lastSupplementAt = null;
+      this.connected = false;
+      this.dom = new DomCommentObserver(documentObject, {
+        onCandidate: (candidate) => this.handleDom(candidate),
+        onMutation: () => this.tick(),
+        onStatus: ({ connected }) => {
+          this.connected = connected;
+          this.publish();
+        }
+      });
+    }
+    start() {
+      if (this.running) return;
+      this.running = true;
+      this.tick();
+      this.dom.start();
+      this.timer = this.window.setInterval(() => this.tick(), this.intervalMs);
+    }
+    stop() {
+      this.running = false;
+      this.dom.stop();
+      if (this.timer != null) this.window.clearInterval(this.timer);
+      this.timer = null;
+      this.entries.clear();
+      this.pending.clear();
+    }
+    entry(id) {
+      if (!this.entries.has(id)) {
+        this.entries.set(id, {
+          id,
+          firstDomAt: null,
+          inFlight: false,
+          handled: null,
+          processed: /* @__PURE__ */ new Set(),
+          retryAt: 0,
+          retryAttempt: 0
+        });
+      }
+      return this.entries.get(id);
+    }
+    freeze(entry, candidate) {
+      if (entry.handled || entry.inFlight) return;
+      Promise.resolve(this.onCandidate({ ...candidate, phase: "pending" })).catch((error) => {
+        if (this.running) this.onError(error);
+      });
+    }
+    handleDom(candidate) {
+      if (!this.running || excludedDomSnapshot(candidate.snapshot)) return;
+      const id = candidate.snapshot.commentId;
+      const known = this.stateAvailable ? this.reader.get(id) : null;
+      if (known?.kind === "excluded") return;
+      if (!this.domSeen.has(id)) {
+        this.domSeen.add(id);
+        if (this.stateCommitted.has(id)) this.stateOnly -= 1;
+      }
+      const entry = this.entry(id);
+      if (entry.domOrigin == null) entry.domOrigin = candidate.captureOrigin;
+      const captureOrigin = captureOriginFor(
+        entry,
+        this.stateAvailable && this.reader.originFor(id) === CAPTURE_ORIGINS.INITIAL_SCAN ? CAPTURE_ORIGINS.INITIAL_SCAN : candidate.captureOrigin
+      );
+      const bare = { ...candidate, captureOrigin, snapshot: plainSnapshot(candidate.snapshot) };
+      if (!entry.processed.has(commentSignature(bare.snapshot))) this.pending.add(entry);
+      if (entry.firstDomAt == null) entry.firstDomAt = this.now();
+      if (candidate.phase === "pending") this.freeze(entry, bare);
+      if (candidate.phase === "final") {
+        entry.domFinal = bare;
+        if (!this.stateAvailable) this.send(entry, { ...bare, captureSource: "dom" });
+        else if (entry.handled && commentSignature(bare.snapshot) !== entry.handled) {
+          this.send(entry, { ...bare, captureSource: "dom" });
+        }
+      }
+      this.publish();
+    }
+    tick() {
+      if (!this.running || this.reading) return;
+      this.reading = true;
+      try {
+        if (this.stateAvailable || this.now() >= this.nextLocate) {
+          const result = this.reader.read();
+          this.stateAvailable = result.available;
+          this.reason = result.reason ?? "";
+          if (!result.available) {
+            this.nextLocate = this.now() + this.retryMs;
+            this.faults.add(this.reason);
+          } else {
+            for (const observation of result.observations ?? []) {
+              const entry = this.entry(observation.snapshot.commentId);
+              this.freeze(entry, {
+                ...observation,
+                captureOrigin: captureOriginFor(entry, observation.captureOrigin)
+              });
+            }
+            for (const issue2 of result.issues) {
+              if (issue2.id == null) this.faults.add(issue2.reason);
+              else this.anomalies.add(`${issue2.id}:${issue2.reason}`);
+            }
+            for (const candidate of result.events) {
+              const entry = this.entry(candidate.snapshot.commentId);
+              this.pending.add(entry);
+              entry.stateFinal = {
+                ...candidate,
+                phase: "final",
+                stable: true,
+                captureSource: "state",
+                captureOrigin: captureOriginFor(entry, candidate.captureOrigin)
+              };
+              this.send(entry, entry.stateFinal);
+            }
+          }
+        }
+        for (const entry of this.pending) {
+          if (entry.inFlight) continue;
+          if (this.stateAvailable && this.reader.get(entry.id)?.kind === "excluded") {
+            entry.stateFinal = null;
+            entry.domFinal = null;
+            this.pending.delete(entry);
+            this.onForget(entry.id);
+            continue;
+          }
+          if (this.stateAvailable && entry.stateFinal && !entry.processed.has(commentSignature(entry.stateFinal.snapshot))) {
+            this.send(entry, entry.stateFinal);
+          } else if (entry.domFinal && !this.stateAvailable) {
+            this.send(entry, { ...entry.domFinal, captureSource: "dom" });
+          } else if (entry.domFinal && entry.handled && !entry.processed.has(commentSignature(entry.domFinal.snapshot))) {
+            this.send(entry, { ...entry.domFinal, captureSource: "dom" });
+          } else if (entry.domFinal && entry.firstDomAt != null && this.now() - entry.firstDomAt >= this.waitMs) {
+            const known = this.reader.get(entry.id);
+            if (known?.kind === "excluded" || known?.kind === "capture") continue;
+            if (entry.handled !== commentSignature(entry.domFinal.snapshot)) {
+              this.orderUncertain = true;
+            }
+            this.send(entry, {
+              ...entry.domFinal,
+              captureSource: "dom",
+              captureFallback: !known,
+              captureSupplement: true
+            });
+          }
+        }
+      } catch {
+        this.stateAvailable = false;
+        this.reader.available = false;
+        this.reason = "\u7559\u8A00\u6E05\u55AE\u8B80\u53D6\u5931\u6557";
+        this.faults.add(this.reason);
+        this.nextLocate = this.now() + this.retryMs;
+      } finally {
+        this.reading = false;
+        this.publish();
+      }
+    }
+    send(entry, candidate) {
+      if (!this.running || entry.inFlight || this.now() < entry.retryAt) return;
+      const signature4 = commentSignature(candidate.snapshot);
+      if (entry.processed.has(signature4)) {
+        this.pending.delete(entry);
+        return;
+      }
+      entry.inFlight = true;
+      const submitted = {
+        ...candidate,
+        domObserved: this.domSeen.has(entry.id)
+      };
+      let work;
+      try {
+        work = this.onCandidate(submitted);
+      } catch (error) {
+        work = Promise.reject(error);
+      }
+      Promise.resolve(work).then((result) => {
+        if (!this.running) return;
+        if (result && !result.ignored && typeof result.anomaly === "boolean") {
+          entry.handled = signature4;
+          entry.processed.add(signature4);
+          entry.retryAt = 0;
+          entry.retryAttempt = 0;
+          if (result.inserted) {
+            this.insertions.set(entry.id, {
+              source: candidate.captureSource,
+              fallback: candidate.captureFallback === true,
+              supplement: candidate.captureSupplement === true
+            });
+            this.countCommitted(entry.id);
+          }
+        } else if (!result?.ignored) this.deferRetry(entry);
+      }).catch((error) => {
+        if (this.running) {
+          this.deferRetry(entry);
+          this.onError(error);
+        }
+      }).finally(() => {
+        entry.inFlight = false;
+        const needsState = entry.stateFinal && !entry.processed.has(commentSignature(entry.stateFinal.snapshot));
+        const needsDom = entry.domFinal && !entry.processed.has(commentSignature(entry.domFinal.snapshot));
+        if (!needsState && !needsDom) this.pending.delete(entry);
+        if (this.running) this.publish();
+      });
+    }
+    deferRetry(entry) {
+      const index = Math.min(entry.retryAttempt, COMMENT_CAPTURE_RETRY_DELAYS_MS.length - 1);
+      entry.retryAt = this.now() + COMMENT_CAPTURE_RETRY_DELAYS_MS[index];
+      entry.retryAttempt = Math.min(entry.retryAttempt + 1, COMMENT_CAPTURE_RETRY_DELAYS_MS.length - 1);
+    }
+    countCommitted(id) {
+      const insertion = this.insertions.get(id);
+      if (!insertion || !this.committed.has(id) || this.counted.has(id)) return;
+      this.counted.add(id);
+      if (insertion.source === "state") {
+        this.stateCommitted.add(id);
+        if (!this.domSeen.has(id)) this.stateOnly += 1;
+      } else if (insertion.fallback) this.domFallback += 1;
+      if (insertion.supplement) this.lastSupplementAt = this.wallNow();
+    }
+    confirmCommitted(ids = []) {
+      if (!this.running) return;
+      for (const id of ids) {
+        this.committed.add(id);
+        this.countCommitted(id);
+      }
+      this.publish();
+    }
+    getStatus() {
+      return {
+        connected: this.connected || this.stateAvailable,
+        stateAvailable: this.stateAvailable,
+        reason: this.reason,
+        stateOnly: Math.max(0, this.stateOnly),
+        domFallback: this.domFallback,
+        stateAnomalies: this.anomalies.size,
+        stateFaults: this.faults.size,
+        orderUncertain: this.orderUncertain,
+        lastSupplementAt: this.lastSupplementAt
+      };
+    }
+    publish() {
+      if (!this.running) return;
+      const status = this.getStatus();
+      const key = JSON.stringify(status);
+      if (key !== this.lastPublished) {
+        this.lastPublished = key;
+        this.onStatus(status);
+      }
     }
   };
 
@@ -4089,6 +4785,10 @@ ${rows.map((row) => serializeCsvRow(rowFromInactiveComment(row))).join("\r\n")}`
   .banner.error { color:#8a1c13; background:#ffe5e0; }
   .banner.warn { color:#6b4600; background:#fff1c7; }
   .status-line { display:flex; align-items:center; gap:7px; margin-bottom:8px; }
+  .capture-mode { font-weight:650; margin-bottom:4px; }
+  .capture-mode.error { color:#a50e0e; }
+  .capture-counts { font-size:11px; line-height:1.5; white-space:pre-line; margin-bottom:8px; }
+  .capture-order { color:#8a1c13; font-weight:650; }
   .dot { width:10px; height:10px; border-radius:50%; background:#9aa0a6; }
   .dot.ok { background:#1e8e3e; } .dot.warn { background:#f9ab00; } .dot.error { background:#d93025; }
   .session { margin-bottom:10px; color:#5f6368; overflow-wrap:anywhere; }
@@ -4250,6 +4950,7 @@ ${rows.map((row) => serializeCsvRow(rowFromInactiveComment(row))).join("\r\n")}`
       this.catalogSaving = false;
       this.singleSaving = false;
       this.exporting = false;
+      this.expandedPanelSize = null;
     }
     mount() {
       if (this.host) return;
@@ -4273,6 +4974,11 @@ ${rows.map((row) => serializeCsvRow(rowFromInactiveComment(row))).join("\r\n")}`
       const statusText = createElement(this.document, "span", "", "\u7B49\u5F85\u8A55\u8AD6\u5340");
       statusLine.append(dot, statusText);
       body.append(statusLine);
+      const captureMode = createElement(this.document, "div", "capture-mode");
+      captureMode.setAttribute("role", "status");
+      const captureCounts = createElement(this.document, "div", "capture-counts");
+      const captureOrder = createElement(this.document, "div", "capture-order");
+      body.append(captureMode, captureCounts, captureOrder);
       const session = createElement(this.document, "div", "session", "Session\uFF1A\u2014");
       body.append(session);
       const sessionNotice = createElement(this.document, "div", "session-notice");
@@ -4574,6 +5280,9 @@ ${rows.map((row) => serializeCsvRow(rowFromInactiveComment(row))).join("\r\n")}`
         dot,
         statusText,
         session,
+        captureMode,
+        captureCounts,
+        captureOrder,
         sessionNotice,
         workspace,
         catalogBox,
@@ -4636,9 +5345,20 @@ ${rows.map((row) => serializeCsvRow(rowFromInactiveComment(row))).join("\r\n")}`
     bindEvents() {
       const e = this.elements;
       e.collapse.addEventListener("click", () => {
-        const collapsed = e.panel.classList.toggle("collapsed");
+        const { left, top } = e.panel.getBoundingClientRect();
+        const collapsed = !e.panel.classList.contains("collapsed");
+        if (collapsed) {
+          this.expandedPanelSize = { width: e.panel.style.width, height: e.panel.style.height };
+          e.panel.style.width = "";
+          e.panel.style.height = "";
+          e.panel.classList.add("collapsed");
+        } else {
+          e.panel.classList.remove("collapsed");
+          e.panel.style.width = this.expandedPanelSize?.width ?? "";
+          e.panel.style.height = this.expandedPanelSize?.height ?? "";
+        }
         e.collapse.textContent = collapsed ? "\u5C55\u958B" : "\u6536\u5408";
-        this.keepPanelInViewport();
+        this.keepPanelInViewport({ left, top });
       });
       e.catalogToggle.addEventListener("click", () => {
         this.setSectionExpanded("catalog", !this.catalogExpanded);
@@ -4809,7 +5529,7 @@ ${rows.map((row) => serializeCsvRow(rowFromInactiveComment(row))).join("\r\n")}`
           `preview-row${row.errors.length ? " error" : row.noSpecsWarning ? " no-spec" : ""}`
         );
         const fieldsWrapper = createElement(this.document, "div", "preview-fields");
-        const inputs = [];
+        const inputs2 = [];
         if (row.rawFields.length === 5) {
           for (let index = 0; index < 5; index += 1) {
             const field = createElement(this.document, "input");
@@ -4817,7 +5537,7 @@ ${rows.map((row) => serializeCsvRow(rowFromInactiveComment(row))).join("\r\n")}`
             field.value = row.rawFields[index];
             field.title = CATALOG_HEADERS[index];
             field.addEventListener("change", () => this.reparseEditedPreview());
-            inputs.push(field);
+            inputs2.push(field);
             fieldsWrapper.append(field);
           }
         } else {
@@ -4839,11 +5559,11 @@ ${rows.map((row) => serializeCsvRow(rowFromInactiveComment(row))).join("\r\n")}`
         }
         wrapper.append(fieldsWrapper, status);
         e.catalogPreview.append(wrapper);
-        this.previewRows.push({ row, inputs });
+        this.previewRows.push({ row, inputs: inputs2 });
       }
     }
     reparseEditedPreview() {
-      const lines = this.previewRows.map(({ row, inputs }) => inputs.length === 5 ? inputs.map((input) => input.value).join("	") : row.rawFields.join("	"));
+      const lines = this.previewRows.map(({ row, inputs: inputs2 }) => inputs2.length === 5 ? inputs2.map((input) => input.value).join("	") : row.rawFields.join("	"));
       this.elements.catalogInput.value = lines.join("\n");
       this.parseCatalogInput();
     }
@@ -5328,6 +6048,20 @@ ${rows.map((row) => serializeCsvRow(rowFromInactiveComment(row))).join("\r\n")}`
       e.session.textContent = `Session\uFF1A${state.sessionId ?? "\u7121\u6CD5\u53D6\u5F97"}`;
       e.statusText.textContent = state.statusText;
       e.dot.className = `dot ${state.statusTone ?? ""}`;
+      const capture = state.captureStatus;
+      e.captureMode.textContent = capture ? capture.stateAvailable ? "\u8B80\u53D6\u65B9\u5F0F\uFF1A\u7559\u8A00\u6E05\u55AE" : "\u8B80\u53D6\u65B9\u5F0F\uFF1A\u756B\u9762\uFF08\u53EF\u80FD\u6F0F\u55AE\uFF09" : "\u8B80\u53D6\u65B9\u5F0F\uFF1A\u672C\u5206\u9801\u5C1A\u672A\u958B\u59CB\u64F7\u53D6";
+      e.captureMode.className = `capture-mode${capture && !capture.stateAvailable ? " error" : ""}`;
+      e.captureMode.title = capture?.reason ?? "";
+      e.captureCounts.textContent = capture ? `\u9760\u6E05\u55AE\u88DC\u5230 ${capture.stateOnly} \u5247\uFF08\u756B\u9762\u8B80\u53D6\u5C1A\u672A\u53D6\u5F97\uFF09
+\u6E05\u55AE\u6F0F\u770B\u3001\u6539\u7531\u756B\u9762\u6536 ${capture.domFallback} \u5247\u30FB\u6E05\u55AE\u7570\u5E38 ${capture.stateAnomalies} \u5247\u30FB\u8B80\u53D6\u6545\u969C ${capture.stateFaults} \u7A2E
+\u5F9E\u672C\u6B21\u555F\u52D5\u8D77\u7B97\uFF1B\u542B\u521D\u59CB\u820A\u7559\u8A00\u8207\u804A\u5929\uFF0C\u662F\u7559\u8A00\u6578\u3001\u4E0D\u662F\u6210\u7ACB\u8A02\u55AE\u6578\u3002` : "";
+      const supplementTime = capture?.lastSupplementAt == null ? "" : new Date(capture.lastSupplementAt).toLocaleTimeString("zh-TW", {
+        hour12: false,
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit"
+      });
+      e.captureOrder.textContent = capture?.orderUncertain ? supplementTime ? `\u6700\u5F8C\u4E00\u6B21\u88DC\u6536 ${supplementTime}\uFF0C\u90A3\u6BB5\u6536\u55AE\u9806\u5E8F\u53EF\u80FD\u4E0D\u6E96` : "\u9019\u6BB5\u6536\u55AE\u9806\u5E8F\u53EF\u80FD\u4E0D\u6E96" : "";
       e.activeCode.textContent = state.activeCode ?? "\u6536\u55AE\u5DF2\u66AB\u505C";
       e.activeMeta.textContent = state.activeCode ? `\u6642\u6BB5 ${state.activationSequence}\u30FB\u81EA ${state.activatedAt ?? "\u2014"} \u8D77\u751F\u6548` : `\u6642\u6BB5 ${state.activationSequence ?? 0}\u30FB\u5C1A\u672A\u555F\u7528\u5546\u54C1\u78BC`;
       const typedCode = normalizeProductCode(e.input.value);
@@ -5414,12 +6148,14 @@ ${rows.map((row) => serializeCsvRow(rowFromInactiveComment(row))).join("\r\n")}`
       this.sessionMonitor = null;
       this.observationContexts = /* @__PURE__ */ new Map();
       this.domConnected = false;
+      this.captureStatus = null;
       this.bannerMessage = "";
       this.bannerTone = "warn";
       this.initializingLock = false;
       this.renderTimer = null;
       this.renderDelayMs = 200;
       this.entryToken = 0;
+      this.captureRunToken = 0;
       this.broadcastChannel = null;
       this.pollTimer = null;
       this.migrationSkippedKeys = [];
@@ -5495,6 +6231,7 @@ ${rows.map((row) => serializeCsvRow(rowFromInactiveComment(row))).join("\r\n")}`
     }
     setupStore() {
       this.store = new IndexedCaptureStore(this.repository, {
+        captureCommitIds: true,
         now: this.options.now ?? (() => Date.now()),
         setTimeout: this.window.setTimeout.bind(this.window),
         clearTimeout: this.window.clearTimeout.bind(this.window),
@@ -5508,7 +6245,8 @@ ${rows.map((row) => serializeCsvRow(rowFromInactiveComment(row))).join("\r\n")}`
         onChange: (sessionId) => {
           if (sessionId === this.currentSessionId) this.render();
         },
-        onCommit: (sessionId, revision) => {
+        onCommit: (sessionId, revision, committedIds = []) => {
+          if (sessionId === this.currentSessionId) this.domObserver?.confirmCommitted(committedIds);
           this.broadcastChannel?.postMessage?.({
             type: "sessionCommitted",
             sessionId,
@@ -5580,6 +6318,7 @@ ${rows.map((row) => serializeCsvRow(rowFromInactiveComment(row))).join("\r\n")}`
       this.initializingLock = false;
       this.observationContexts.clear();
       this.domConnected = false;
+      this.captureStatus = null;
       this.currentSessionId = sessionId;
       if (!sessionId) {
         rememberTabSession(this.window.sessionStorage, null);
@@ -5625,6 +6364,7 @@ ${rows.map((row) => serializeCsvRow(rowFromInactiveComment(row))).join("\r\n")}`
       this.store.discardSession(sessionId);
       this.observationContexts.clear();
       this.domObserver?.stop();
+      this.captureStatus = null;
       if (isOwner) {
         await this.store.openSession(sessionId, { pauseOnOpen: true });
         if (this.stopped || sessionId !== this.currentSessionId) return;
@@ -5640,12 +6380,20 @@ ${rows.map((row) => serializeCsvRow(rowFromInactiveComment(row))).join("\r\n")}`
       this.render({ immediate: true });
     }
     startDomObserver() {
-      this.domObserver = new DomCommentObserver(this.document, {
-        onCandidate: (candidate) => {
-          void this.handleCandidate(candidate);
+      this.domObserver?.stop();
+      const token = this.entryToken;
+      const captureRunToken = ++this.captureRunToken;
+      this.domObserver = new CommentCaptureCoordinator(this.document, {
+        ...this.options.commentCaptureOptions,
+        onCandidate: (candidate) => token === this.entryToken && !this.stopped ? this.handleCandidate({ ...candidate, captureRunToken }) : { inserted: false, anomaly: false, ignored: "stale-session" },
+        onError: (error) => this.reportError(error),
+        onForget: (id) => {
+          if (token === this.entryToken) this.observationContexts.delete(id);
         },
-        onStatus: ({ connected }) => {
-          this.domConnected = connected;
+        onStatus: (status) => {
+          if (token !== this.entryToken || this.stopped) return;
+          this.captureStatus = status;
+          this.domConnected = status.connected;
           this.render();
         }
       });
@@ -5659,27 +6407,33 @@ ${rows.map((row) => serializeCsvRow(rowFromInactiveComment(row))).join("\r\n")}`
       ].join(":");
     }
     async handleCandidate(candidate) {
-      if (!this.currentSessionId || !this.lock?.isOwner) return;
+      if (!this.currentSessionId || !this.lock?.isOwner || this.stopped) return;
+      if (candidate.captureRunToken != null && candidate.captureRunToken !== this.captureRunToken) return;
+      const sessionId = this.currentSessionId;
+      const token = this.entryToken;
       const key = this.contextKey(candidate.snapshot);
       if (!this.observationContexts.has(key)) {
-        const view2 = this.store.getSessionView(this.currentSessionId);
+        const view2 = { config: this.store.getCaptureConfig(sessionId) };
         this.observationContexts.set(key, {
           firstSeenAt: Date.now(),
           captureOrigin: candidate.captureOrigin,
-          activeCodeAtFirstSeen: view2?.config.activeCode,
-          activationSequenceAtFirstSeen: view2?.config.activationSequence,
-          profileAtFirstSeen: snapshotSpecProfile(view2?.config),
-          productMetaAtFirstSeen: {
+          activeCodeAtFirstSeen: view2?.config?.activeCode,
+          activationSequenceAtFirstSeen: view2?.config?.activationSequence,
+          profileAtFirstSeen: view2?.config ? snapshotSpecProfile(view2.config) : void 0,
+          productMetaAtFirstSeen: view2?.config ? {
             productName: view2?.config.productName ?? "",
             price: view2?.config.price ?? ""
-          },
-          latestProfileByCodeAtFirstSeen: this.store.getLatestProfileByCode(this.currentSessionId)
+          } : void 0,
+          latestProfileByCodeAtFirstSeen: view2?.config ? this.store.getLatestProfileByCode(this.currentSessionId) : void 0
         });
+      }
+      if (candidate.captureOrigin === "initialScan") {
+        this.observationContexts.get(key).captureOrigin = "initialScan";
       }
       if (candidate.phase !== "final") return;
       const context = this.observationContexts.get(key);
-      const view = this.store.getSessionView(this.currentSessionId);
-      if (context.activeCodeAtFirstSeen === void 0) {
+      const view = context.activeCodeAtFirstSeen === void 0 ? { config: this.store.getCaptureConfig(sessionId) } : null;
+      if (context.activeCodeAtFirstSeen === void 0 && view?.config) {
         context.activeCodeAtFirstSeen = view?.config.activeCode ?? null;
         context.activationSequenceAtFirstSeen = view?.config.activationSequence ?? 0;
         context.profileAtFirstSeen = snapshotSpecProfile(view?.config);
@@ -5691,18 +6445,32 @@ ${rows.map((row) => serializeCsvRow(rowFromInactiveComment(row))).join("\r\n")}`
       }
       this.observationContexts.delete(key);
       try {
+        await Promise.resolve();
+        if (token !== this.entryToken || sessionId !== this.currentSessionId || this.stopped || !this.lock?.isOwner || candidate.captureRunToken != null && candidate.captureRunToken !== this.captureRunToken) {
+          return { inserted: false, anomaly: false, ignored: "stale-capture" };
+        }
         const result = await this.store.recordCapture(
-          this.currentSessionId,
+          sessionId,
           candidate.snapshot,
           context,
-          { stable: candidate.stable }
+          {
+            stable: candidate.stable,
+            captureSource: candidate.captureSource,
+            domObserved: candidate.domObserved
+          }
         );
+        if (token !== this.entryToken || sessionId !== this.currentSessionId || this.stopped || candidate.captureRunToken != null && candidate.captureRunToken !== this.captureRunToken) return result;
         if (result.anomaly) {
           this.bannerMessage = "\u5075\u6E2C\u5230\u540C\u4E00\u7559\u8A00 ID \u51FA\u73FE\u4E0D\u540C\u5167\u5BB9\uFF0C\u5DF2\u4FDD\u7559\u9996\u6B21\u8CC7\u6599\u4E26\u6A19\u8A18 DOM \u7570\u5E38\u3002";
           this.bannerTone = "error";
         }
+        this.render();
+        return result;
       } catch (error) {
+        if (token !== this.entryToken || sessionId !== this.currentSessionId || this.stopped || candidate.captureRunToken != null && candidate.captureRunToken !== this.captureRunToken) return;
+        if (!this.observationContexts.has(key)) this.observationContexts.set(key, context);
         this.reportError(error);
+        return;
       }
       this.render();
     }
@@ -5979,8 +6747,13 @@ ${oldSessionIds.join("\n")}
       }
     }
     reportError(error) {
-      this.bannerMessage = error?.message ?? "\u767C\u751F\u672A\u77E5\u932F\u8AA4\u3002";
+      const message = error?.message ?? "\u767C\u751F\u672A\u77E5\u932F\u8AA4\u3002";
+      const sameError = this.bannerTone === "error" && this.bannerMessage === message;
+      this.bannerMessage = message;
       this.bannerTone = "error";
+      const now = this.window.performance.now();
+      if (sameError && this.lastErrorRenderedAt != null && now - this.lastErrorRenderedAt < COMMENT_CAPTURE_ERROR_REPEAT_MS) return;
+      this.lastErrorRenderedAt = now;
       this.render({ immediate: true });
     }
     render({ immediate = false } = {}) {
@@ -6038,6 +6811,7 @@ ${oldSessionIds.join("\n")}
         statusText,
         statusTone,
         canWrite,
+        captureStatus: this.captureStatus,
         activeCode: view?.config.activeCode ?? null,
         activationSequence: view?.config.activationSequence ?? 0,
         profileRevision: view?.config.profileRevision ?? 0,

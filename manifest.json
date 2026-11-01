@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "publishedAt": "2026-11-01T07:39:12.186Z",
+  "publishedAt": "2026-11-01T08:12:34.806Z",
   "scripts": [
     {
       "id": "fb-inbox-finder",
@@ -76,11 +76,11 @@
       "id": "shopee-live-order-capture",
       "name": "Shopee Live Order Capture",
       "namespace": "https://github.com/EthanTW1031/Shopee",
-      "version": "0.5.0",
+      "version": "0.6.0",
       "file": "scripts/shopee-live-order-capture.user.js",
-      "sha256": "ce1495540dbd3e38d54ea584f19c2f424ef9f9f30536c61cb9914edb26ec5eaf",
-      "bytes": 258680,
-      "updatedAt": "2026-10-11T14:47:12.944Z"
+      "sha256": "741d23bf60f29dc1ffb64e1e25dcbce9187dfd355fce5c039129f4574b52339e",
+      "bytes": 294638,
+      "updatedAt": "2026-11-01T08:12:34.806Z"
     },
     {
       "id": "shopee-replay-add-order",
