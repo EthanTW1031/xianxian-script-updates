@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jambo 商品庫存
 // @namespace    https://jambolive.tv/
-// @version      2.1.6
+// @version      2.1.7
 // @description  獨立匯出含圖片、成本價與直購價的商品庫存及五欄商品清單 XLSX
 // @match        https://jambolive.tv/console/commodity/*
 // @require      https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js
@@ -979,6 +979,15 @@ function createEthanToolDock({id,label,name,version,order,colour,panel,collapse,
         throw new Error('讀取已喊標期間商品清單已變動，請重新搜尋後再試');
       }
       const stockStyles = readModernStockRows(name).slice(1).map(([style]) => style);
+      if (stockStyles.length === 0) {
+        // 只有一款的商品通常沒有樣式選單（有也只會有「全部」），銷售狀況直接顯示總數。
+        const selects = getModernSalesCell(name).querySelectorAll('select[aria-label="樣式"]');
+        if (selects.length > 1 || (selects.length === 1 && selects[0].options.length !== 1)) {
+          throw new Error(`商品「${product.name}」銷售狀況的樣式和庫存樣式對不上，已停止`);
+        }
+        calledCounts.set(product.id, new Map([['全部', readModernCalledValue(name)]]));
+        continue;
+      }
       const options = Array.from(getModernSalesStyleSelect(name).options).map((option) => ({
         value: option.value,
         label: cleanText(option.textContent),
@@ -1803,7 +1812,7 @@ function createEthanToolDock({id,label,name,version,order,colour,panel,collapse,
     let clampPanelPosition = () => {};
 
     document.body.appendChild(panel);
-    dock=createEthanToolDock({id:"jambo-stock",label:"庫存",name:"Jambo 商品庫存",version:"2.1.6",order:20,colour:"#1d4ed8",panel,collapse:toggleButton});
+    dock=createEthanToolDock({id:"jambo-stock",label:"庫存",name:"Jambo 商品庫存",version:"2.1.7",order:20,colour:"#1d4ed8",panel,collapse:toggleButton});
     clampPanelPosition = makePanelDraggable(
       panel,
       titleBar,
