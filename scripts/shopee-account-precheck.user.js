@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Shopee 帳號預檢
 // @namespace    local.shopee.account-precheck
-// @version      0.4.8
-// @description  搜尋帳號與封鎖旗標，不發訊息；搜尋結果沒有封鎖欄位時才點進對話看封鎖；無損分開匯出預檢通過與待處理 CSV
+// @version      0.4.9
+// @description  搜尋帳號與封鎖旗標，不發訊息；買家搜尋找不到時改看本次買家訊息並點進對話確認；比對直播檔 UID；無損分開匯出預檢通過與待處理 CSV
 // @match        https://seller.shopee.tw/new-webchat/conversations*
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -991,9 +991,9 @@ function createEthanToolDock({id,label,name,version,order,colour,panel,collapse,
         const key = Object.keys(node || {}).find((k) => k.startsWith("__reactFiber$"));
         return key ? node[key] : null;
       }
-      function ownEntityInProps(node, predicate) {
+      function ownEntityInProps(node, predicate, maxDepth = 12) {
         let f = fiberOf(node);
-        for (let depth = 0; f && depth < 12; depth++, f = f.return) {
+        for (let depth = 0; f && depth < maxDepth; depth++, f = f.return) {
           const props = f.memoizedProps;
           const scan = (v, n) => {
             if (!object(v) || n > 2 || typeof v.getState === "function") return false;
@@ -1037,7 +1037,12 @@ function createEthanToolDock({id,label,name,version,order,colour,panel,collapse,
           });
           if (!nodes.length) throw problem("BLOCK_CHECK_FAILED", "搜尋結果的畫面對不上這位買家。");
           chat2.safe(stop);
-          chat2.activate(nodes[0]);
+          try {
+            activateMessage({ node: nodes[0], root: columnRoot(input), predicate: (v) => v.id === match.id && v.to_name === match.to_name && v.to_id === match.to_id });
+          } catch (error) {
+            if (error.code !== "RESCUE_OPEN_FAILED") throw error;
+            throw problem("BLOCK_CHECK_FAILED", error.message);
+          }
           return chat2.wait(() => {
             const state = store.getState(), id = state.conversationReducer?.currentConversationId;
             if (!decimal(id)) return null;
@@ -1048,7 +1053,309 @@ function createEthanToolDock({id,label,name,version,order,colour,panel,collapse,
           }, timeout, stop, "BLOCK_CHECK_FAILED", "點進對話後讀不到封鎖狀態。");
         };
       }
-      module.exports = { classifyForPrecheck, createBlockChecker };
+      var NO_UID_NOTE = "（直播檔沒有 UID，沒有比對）";
+      var UID_GATED = /* @__PURE__ */ new Set(["FOUND", "CHAT_BLOCKED", "BLOCK_FLAG_MISSING", "NO_EXACT_MATCH"]);
+      var unwrapUid = (value) => {
+        const s = String(value ?? "").trim(), m = s.match(/^="((?:[^"]|"")*)"$/u);
+        return m ? m[1].replaceAll('""', '"') : s;
+      };
+      function sourceIdentities(entry) {
+        const collected = /* @__PURE__ */ new Map();
+        for (const r of entry.records.slice(1)) {
+          if (!r.account || r.fields[13]?.trim() === "inactiveCode" || !r.fields.some((v) => String(v).trim())) continue;
+          const p = collected.get(r.account) || { values: /* @__PURE__ */ new Set(), invalidRows: [] };
+          const uid = unwrapUid(r.fields[4]);
+          if (uid) {
+            if (/^[1-9][0-9]*$/u.test(uid)) p.values.add(uid);
+            else p.invalidRows.push(r.row);
+          }
+          collected.set(r.account, p);
+        }
+        return new Map(entry.accounts.map((account) => {
+          const p = collected.get(account) || { values: /* @__PURE__ */ new Set(), invalidRows: [] }, values = [...p.values];
+          return [account, { kind: p.invalidRows.length ? "invalid" : values.length > 1 ? "conflict" : values.length ? "one" : "none", uid: values.length === 1 ? values[0] : null, values, invalidRows: p.invalidRows }];
+        }));
+      }
+      var unconfirmed = (code, detail) => ({ status: "searchUnconfirmed", code, detail });
+      function applySourceUid(base, source) {
+        if (!UID_GATED.has(base.code)) return base;
+        if (source.kind === "invalid") return unconfirmed("SOURCE_UID_INVALID", `直播檔裡這個帳號的 UID 格式不正確（原檔第 ${source.invalidRows.join("、")} 列），請核對抓單原檔。`);
+        if (source.kind === "conflict") return unconfirmed("SOURCE_UID_CONFLICT", "直播檔裡這個帳號有兩個以上不同的 UID，請核對抓單原檔。");
+        if (base.code === "NO_EXACT_MATCH") return source.kind === "none" ? unconfirmed("RESCUE_NO_UID", "買家搜尋沒有完全相同的帳號；直播檔沒有這位的 UID，無法用買家訊息比對身分，請人工核對。") : base;
+        const match = base.conversation || base.match;
+        if (source.kind === "one" && String(match.to_id) !== source.uid) return unconfirmed("UID_MISMATCH", `買家搜尋找到同名帳號，但 UID 和直播檔不同（搜尋：${match.to_id}／直播檔：${source.uid}），可能不是同一個人，請人工核對。`);
+        return base;
+      }
+      function rescueCandidate(rows, account, uid) {
+        const exact = rows.filter((r) => object(r) && r.to_name === account);
+        if (!exact.length) return unconfirmed("RESCUE_NO_MATCH", "本次已載入的買家訊息結果裡，沒有帳號與 UID 都相同的資料，請人工核對。");
+        if (exact.some((r) => !safeUid(r.to_id) || !decimal(r.message_id) || !decimal(r.conversation_id))) return unconfirmed("RESCUE_DATA_INVALID", "本次同名訊息結果的 UID、訊息編號或對話編號格式不完整，無法確認身分，請人工核對。");
+        if (exact.some((r) => String(r.to_id) !== uid)) return unconfirmed("RESCUE_UID_MISMATCH", "買家訊息裡有同名帳號，但 UID 和直播檔不同，請人工核對。");
+        if (new Set(exact.map((r) => r.conversation_id)).size !== 1) return unconfirmed("RESCUE_AMBIGUOUS", "買家訊息裡這位對到不只一個對話，請人工核對。");
+        return { candidates: exact };
+      }
+      var messageProjection = (rows) => rows.map((r) => object(r) ? { to_name: r.to_name, to_id: r.to_id, message_id: r.message_id, conversation_id: r.conversation_id } : null);
+      var scalar = (v) => ["string", "number", "boolean"].includes(typeof v) || v == null ? v : "<invalid>";
+      var stamp = (rows) => JSON.stringify(rows.map((r) => r && [scalar(r.to_name), scalar(r.to_id), scalar(r.message_id), scalar(r.conversation_id)]));
+      var querySequence = 0;
+      function observeMessages(account, stop) {
+        const input = chat2.inputElement(), store = chat2.findStore(input), sequence = ++querySequence;
+        if (!store) throw problem("STORE", "找不到聊聊資料，已停止。");
+        const initialKeyword = store.getState()?.searchReducer?.keyword;
+        let active = true, cleared = false, targetSeen = false, reset = false, resetFilter = null, success = null, pageChanged = false, failure = null, scrollRoot = null;
+        try {
+          scrollRoot = columnRoot(input);
+        } catch (error) {
+          if (error.code !== "BLOCK_CHECK_FAILED") throw error;
+        }
+        const scrolling = () => {
+          if (active && reset) pageChanged = true;
+        };
+        for (const event of ["scroll", "wheel", "touchmove"]) scrollRoot?.addEventListener(event, scrolling, true);
+        function assertCurrent(filter) {
+          chat2.safe(stop);
+          if (chat2.inputElement() !== input || !document.contains(input)) throw problem("SEARCH_INPUT", "搜尋框被替換，已停止。");
+          if (chat2.findStore(input) !== store) throw problem("STORE_CHANGED", "聊聊資料來源已被替換，已停止；請重跑。");
+          const s = store.getState()?.searchReducer;
+          if (!object(s)) throw problem("DATA", "搜尋資料格式不符合預期，已停止。");
+          if (input.value !== account || s.keyword !== account) throw problem("SEARCH_UNRELIABLE", "搜尋關鍵字中途變動，已停止本輪。");
+          if (s.searchFilter !== filter) throw problem("SCOPE", "搜尋範圍中途變動，已停止。");
+          if (failure) throw failure;
+          return s;
+        }
+        function capture() {
+          if (!active) return;
+          try {
+            chat2.safe(stop);
+            if (chat2.inputElement() !== input || !document.contains(input)) throw problem("SEARCH_INPUT", "搜尋框被替換，已停止。");
+            if (chat2.findStore(input) !== store) throw problem("STORE_CHANGED", "聊聊資料來源已被替換，已停止；請重跑。");
+            const s = store.getState()?.searchReducer;
+            if (!object(s)) throw problem("DATA", "搜尋資料格式不符合預期，已停止。");
+            if (s.keyword === "" && (!targetSeen || input.value === "")) {
+              if (reset) pageChanged = true;
+              cleared = true;
+              return;
+            }
+            if (!cleared) return;
+            if (input.value !== account) throw problem("SEARCH_UNRELIABLE", "搜尋關鍵字中途變動，已停止本輪。");
+            if (!targetSeen && (s.keyword === "" || s.keyword === initialKeyword && s.keyword !== account)) return;
+            if (s.keyword !== account) throw problem("SEARCH_UNRELIABLE", "搜尋關鍵字中途變動，已停止本輪。");
+            targetSeen = true;
+            const b = s.searchResult?.message, p = s.pagination?.message;
+            if (!object(b) || !Array.isArray(b.results) || typeof b.status !== "string") return;
+            if (b.status === "" && b.results.length === 0) {
+              if (success) pageChanged = true;
+              reset = true;
+              resetFilter = s.searchFilter;
+              return;
+            }
+            if (!reset || b.status !== "succeed") return;
+            if (resetFilter !== s.searchFilter) {
+              pageChanged = true;
+              return;
+            }
+            if (!object(p) || typeof p.hasMore !== "boolean") return;
+            const rows = messageProjection(b.results), fingerprint = stamp(rows), pagination = JSON.stringify([scalar(p.pageIndex), scalar(p.pageSize), scalar(p.nextOffset), p.hasMore]);
+            if (p.pageIndex !== void 0 && p.pageIndex !== 0 && p.pageIndex !== 1) pageChanged = true;
+            if (rows.length > 20 || p.pageSize !== void 0 && (!Number.isSafeInteger(p.pageSize) || p.pageSize <= 0 || rows.length > p.pageSize)) pageChanged = true;
+            if (success && (success.fingerprint !== fingerprint || success.pagination !== pagination)) pageChanged = true;
+            if (!success) success = { sequence, filter: s.searchFilter, rows, hasMore: p.hasMore, fingerprint, pagination };
+          } catch (error) {
+            failure ??= error;
+          }
+        }
+        const cancel = store.subscribe(capture);
+        if (typeof cancel !== "function") {
+          for (const event of ["scroll", "wheel", "touchmove"]) scrollRoot?.removeEventListener(event, scrolling, true);
+          throw problem("STORE", "聊聊資料訂閱不支援取消，已停止。");
+        }
+        capture();
+        return {
+          input,
+          store,
+          sequence,
+          assertCurrent,
+          async completed(filter, timeout) {
+            return chat2.wait(() => {
+              assertCurrent(filter);
+              capture();
+              if (failure) throw failure;
+              if (pageChanged) throw problem("RESCUE_UNFINISHED", "買家訊息結果已變動或不再是本次第一頁。");
+              const b = store.getState()?.searchReducer?.searchResult?.message;
+              return reset && success && success.sequence === sequence && success.filter === filter && b?.status === "succeed" ? success : null;
+            }, timeout, stop, "RESCUE_UNFINISHED", "買家訊息搜尋沒有確認本次重設與完成。");
+          },
+          verify(candidate, filter) {
+            const s = assertCurrent(filter);
+            capture();
+            if (failure) throw failure;
+            if (pageChanged || !success || s.searchResult?.message?.status !== "succeed") throw problem("RESCUE_UNFINISHED", "買家訊息結果已變動或不再是本次第一頁。");
+            const current = messageProjection(s.searchResult.message.results);
+            if (stamp(current) !== success.fingerprint) throw problem("RESCUE_UNFINISHED", "買家訊息結果已變動。");
+            if (candidate && !current.some((r) => r && r.message_id === candidate.message_id && r.conversation_id === candidate.conversation_id && r.to_name === candidate.to_name && r.to_id === candidate.to_id)) throw problem("RESCUE_UNFINISHED", "所選訊息已不在本次搜尋結果中。");
+          },
+          close() {
+            if (active) {
+              active = false;
+              cancel();
+              for (const event of ["scroll", "wheel", "touchmove"]) scrollRoot?.removeEventListener(event, scrolling, true);
+            }
+          }
+        };
+      }
+      function ownClick(node) {
+        const f = fiberOf(node), key = Object.keys(node || {}).find((k) => k.startsWith("__reactProps$"));
+        return typeof f?.memoizedProps?.onClick === "function" || typeof node[key]?.onClick === "function" || typeof node.onclick === "function";
+      }
+      function clickPoint(node, root) {
+        if (!chat2.visible(node) || !document.contains(node)) return null;
+        const r = node.getBoundingClientRect(), x = r.left + r.width * 0.5, y = r.top + r.height * 0.5;
+        if (x < 0 || y < 0 || x >= innerWidth || y >= innerHeight) return null;
+        for (let n = node.parentElement; n; n = n.parentElement) {
+          const style = getComputedStyle(n);
+          if (/auto|scroll|hidden|clip/u.test(style.overflowY + style.overflowX)) {
+            const c = n.getBoundingClientRect();
+            if (x < c.left || x >= c.right || y < c.top || y >= c.bottom) return null;
+          }
+          if (n === root) break;
+        }
+        const target = document.elementFromPoint(x, y);
+        if (!target || target !== node && !node.contains(target) || target.closest('a,input,textarea,[contenteditable="true"]')) return null;
+        const button = target.closest("button");
+        if (button && button !== node) return null;
+        return { target, x, y };
+      }
+      function messageNode(input, candidates) {
+        const root = columnRoot(input), matches = [];
+        for (const candidate of candidates) {
+          const predicate = (v) => v.message_id === candidate.message_id && v.conversation_id === candidate.conversation_id && v.to_name === candidate.to_name && v.to_id === candidate.to_id;
+          const bound = [...root.querySelectorAll("div,li,span,p,button")].filter((node) => !node.closest(chat2.PANELS) && !node.closest('a,input,textarea,[contenteditable="true"]') && ownClick(node) && ownEntityInProps(node, predicate) && (!node.matches("button") || ownEntityInProps(node, predicate, 1)));
+          const nodes = bound.filter((node) => !bound.some((other) => other !== node && other.contains(node)));
+          for (const node of nodes) {
+            const point = clickPoint(node, root);
+            if (point) matches.push({ node, point, candidate, predicate });
+          }
+        }
+        matches.sort((a, b) => {
+          const x = a.node.getBoundingClientRect(), y = b.node.getBoundingClientRect();
+          return x.width * x.height - y.width * y.height;
+        });
+        if (!matches.length) throw problem("RESCUE_OPEN_FAILED", "沒有可綁定、可見且可點到的訊息搜尋結果。");
+        return { ...matches[0], root };
+      }
+      function activateMessage(bound) {
+        const { node, predicate, root } = bound, point = clickPoint(node, root);
+        if (!point || !ownEntityInProps(node, predicate)) throw problem("RESCUE_OPEN_FAILED", "訊息搜尋結果的節點或綁定已變動。");
+        const { target, x: clientX, y: clientY } = point, mouse = { bubbles: true, cancelable: true, composed: true, clientX, clientY, button: 0, buttons: 1, detail: 1 }, pointer = { ...mouse, pointerId: 1, pointerType: "mouse", isPrimary: true, width: 1, height: 1, pressure: 0.5 };
+        target.focus?.({ preventScroll: true });
+        const P = typeof PointerEvent === "function" ? PointerEvent : MouseEvent;
+        for (const [name, C, init2] of [["pointerover", P, pointer], ["mouseover", MouseEvent, mouse], ["pointerdown", P, pointer], ["mousedown", MouseEvent, mouse], ["pointerup", P, { ...pointer, buttons: 0 }], ["mouseup", MouseEvent, { ...mouse, buttons: 0 }], ["click", MouseEvent, { ...mouse, buttons: 0 }]]) {
+          if (name === "click" && (!document.contains(node) || !ownEntityInProps(node, predicate) || clickPoint(node, root)?.target !== target)) throw problem("RESCUE_OPEN_FAILED", "點擊前搜尋列已被替換或遮擋。");
+          target.dispatchEvent(new C(name, init2));
+        }
+      }
+      async function openMessage(bound, observer, filter, uid, stop, timeout, onObserved) {
+        observer.verify(bound.candidate, filter);
+        chat2.safe(stop);
+        observer.close();
+        activateMessage(bound);
+        return chat2.wait(() => {
+          const state = observer.store.getState(), id = state.conversationReducer?.currentConversationId;
+          if (id !== bound.candidate.conversation_id) return null;
+          const c = state.entityReducer?.conversations?.[id];
+          if (!object(c)) return null;
+          onObserved?.(id, c.to_id);
+          if (c.to_name !== bound.candidate.to_name || !safeUid(c.to_id) || String(c.to_id) !== uid || c.id !== void 0 && c.id !== id) throw problem("RESCUE_OPEN_FAILED", "打開的對話編號、帳號或 UID 對不上。");
+          if (typeof c.is_blocked !== "boolean") return null;
+          let current;
+          try {
+            current = chat2.findStore();
+          } catch (error) {
+            if (error.code === "SEARCH_INPUT") return null;
+            throw error;
+          }
+          if (current !== observer.store) throw problem("STORE_CHANGED", "聊聊資料來源已被替換，已停止；請重跑。");
+          return { conversationId: id, to_id: c.to_id, is_blocked: c.is_blocked };
+        }, timeout, stop, "RESCUE_OPEN_FAILED", "點進對話後讀不到可核對的封鎖狀態。");
+      }
+      function createPrecheckEngine({ runtime, stop = () => false, onOpening = () => {
+      }, messageTimeout = 5e3, openTimeout = chat2.LIMITS.conversation } = {}) {
+        const checkBlocked = createBlockChecker({ stop, timeout: openTimeout });
+        return async function check(account, source = { kind: "none", uid: null, values: [], invalidRows: [] }) {
+          const observer = observeMessages(account, stop), diagnostic = { account, route: "user", sourceUid: source.kind === "one" ? source.uid : null, sourceState: source.kind, searchUid: null, searchUids: [], openedUid: null, openAttempted: false, conversationId: null };
+          let result;
+          try {
+            let q;
+            try {
+              q = await runtime.query(account, "user", "all");
+            } catch (error) {
+              if (error.code !== "SEARCH_UNFINISHED") throw error;
+              return { ...unconfirmed("SEARCH_UNFINISHED", "未完成搜尋：沒有看到本次重設與完成，請人工核對後手動重查。"), diagnostic };
+            }
+            observer.assertCurrent(q.filter);
+            const base = classifyForPrecheck(q.results, account), match = base.conversation || base.match;
+            diagnostic.searchUid = match?.to_id ?? null;
+            result = applySourceUid(base, source);
+            if (result.code === "NO_EXACT_MATCH") {
+              diagnostic.route = "message";
+              try {
+                const page = await observer.completed(q.filter, messageTimeout), selected = rescueCandidate(page.rows, account, source.uid);
+                diagnostic.searchUids = [...new Set(page.rows.filter((r) => r?.to_name === account && safeUid(r.to_id)).map((r) => r.to_id))];
+                diagnostic.searchUid = diagnostic.searchUids.length === 1 ? diagnostic.searchUids[0] : null;
+                if (!selected.candidates) {
+                  result = selected;
+                  if (result.code === "RESCUE_NO_MATCH" && page.hasMore) result = { ...result, detail: result.detail + "（只檢查第一頁）" };
+                } else {
+                  const bound = messageNode(observer.input, selected.candidates);
+                  diagnostic.searchUid = bound.candidate.to_id;
+                  onOpening(account, "message");
+                  diagnostic.openAttempted = true;
+                  const opened = await openMessage(bound, observer, q.filter, source.uid, stop, openTimeout, (id, uid) => {
+                    diagnostic.conversationId = id;
+                    diagnostic.openedUid = safeUid(uid) ? uid : null;
+                  });
+                  diagnostic.openedUid = opened.to_id;
+                  diagnostic.conversationId = opened.conversationId;
+                  result = opened.is_blocked ? { status: "chatBlocked", code: "CHAT_BLOCKED_VIA_MESSAGE_AFTER_OPEN", detail: "買家搜尋沒有完全相同的帳號；從買家訊息找到，點進對話確認：聊聊已封鎖，整位排除。" } : { status: "found", code: "FOUND_VIA_MESSAGE_AFTER_OPEN", detail: "買家搜尋沒有完全相同的帳號；從買家訊息找到（帳號與 UID 都和直播檔相同），點進對話確認沒封鎖（對話會變已讀）；沒有發送訊息。" };
+                }
+              } catch (error) {
+                if (!["RESCUE_UNFINISHED", "RESCUE_OPEN_FAILED"].includes(error.code)) throw error;
+                result = unconfirmed(error.code, error.code === "RESCUE_UNFINISHED" ? "買家搜尋沒有完全相同的帳號；買家訊息搜尋沒有確認本次完成，請人工核對後手動重查。" : `從買家訊息找到這位，但點進對話確認沒有成功（${error.message}），請人工核對。`);
+              }
+              if (q.results.length) {
+                const prefix = `買家搜尋沒有完全相同的帳號（有 ${q.results.length} 筆部分相符）；`;
+                result = { ...result, detail: prefix + result.detail.replace(/^買家搜尋沒有完全相同的帳號；/u, "") };
+              }
+            } else if (base.code === "NO_EXACT_MATCH" && result.code === "RESCUE_NO_UID" && q.results.length) {
+              result = { ...result, detail: result.detail.replace("買家搜尋沒有完全相同的帳號；", `買家搜尋沒有完全相同的帳號（有 ${q.results.length} 筆部分相符）；`) };
+            } else if (result.status === "needsBlockCheck") {
+              diagnostic.route = "user-after-open";
+              observer.close();
+              onOpening(account, "user");
+              diagnostic.openAttempted = true;
+              try {
+                const b = await checkBlocked(result.match);
+                diagnostic.openedUid = result.match.to_id;
+                diagnostic.conversationId = b.conversationId;
+                result = b.is_blocked ? { status: "chatBlocked", code: "CHAT_BLOCKED_AFTER_OPEN", detail: "搜尋結果沒有封鎖欄位；點進對話確認：聊聊已封鎖，整位排除。" } : { status: "found", code: "FOUND_AFTER_OPEN", detail: "搜尋結果沒有封鎖欄位；點進對話確認沒封鎖（對話會變已讀），沒有發送訊息。" };
+              } catch (error) {
+                if (error.code !== "BLOCK_CHECK_FAILED") throw error;
+                result = unconfirmed("BLOCK_CHECK_FAILED", `找得到帳號，但點進對話確認封鎖沒有成功（${error.message}），請人工核對。`);
+              }
+            }
+            if (source.kind === "none" && ["FOUND", "CHAT_BLOCKED", "BLOCK_FLAG_MISSING"].includes(base.code) && result.code !== "UID_MISMATCH") result = { ...result, detail: result.detail + NO_UID_NOTE };
+            return { ...result, diagnostic };
+          } finally {
+            observer.close();
+          }
+        };
+      }
+      function resultLog(account, result, dry) {
+        const label = result.status === "found" ? "找得到，留" : result.status === "chatBlocked" ? "聊聊已封鎖，排除" : result.status === "blocked" ? "黑名單排除" : "搜尋未確認";
+        const note = result.code.includes("_VIA_MESSAGE_") ? "（從買家訊息找到，點進對話確認）" : result.code === "UID_MISMATCH" ? "（UID 和直播檔不同）" : /_AFTER_OPEN$/u.test(result.code) ? "（點進對話確認）" : "";
+        return `${account}：${label}${note}${dry ? "（演練，不寫結果）" : ""}`;
+      }
+      module.exports = { classifyForPrecheck, createBlockChecker, unwrapUid, sourceIdentities, applySourceUid, rescueCandidate, observeMessages, createPrecheckEngine, resultLog };
     }
   });
 
@@ -1107,7 +1414,7 @@ function createEthanToolDock({id,label,name,version,order,colour,panel,collapse,
           place(r.left, r.top);
         });
         const replay = attribute === "data-replay-add-order";
-        const dock = createEthanToolDock({ id: replay ? "replay" : "precheck", label: replay ? "回放" : "預檢", name: replay ? "回放加單" : "帳號預檢", version: replay ? "0.2.7" : "0.4.8", order: replay ? 20 : 10, colour, panel, collapse: $("[data-collapse]") });
+        const dock = createEthanToolDock({ id: replay ? "replay" : "precheck", label: replay ? "回放" : "預檢", name: replay ? "回放加單" : "帳號預檢", version: replay ? "0.2.7" : "0.4.9", order: replay ? 20 : 10, colour, panel, collapse: $("[data-collapse]") });
         const show = (message, error = false) => {
           dock.status(error, "phase1");
           const target = $("[data-status]");
@@ -1162,20 +1469,26 @@ function createEthanToolDock({id,label,name,version,order,colour,panel,collapse,
       var blockCheck = require_precheck_block_check();
       var { problem, safeMessage } = require_util();
       var { mountPanel, gmAdapter } = require_panel();
-      var VERSION = "0.4.8";
+      var VERSION = "0.4.9";
       async function initPrecheck(onFormalSuccess = async () => {
-      }) {
-        const gm = gmAdapter(), ui2 = mountPanel({ attribute: "data-account-precheck", title: `帳號預檢 v${VERSION}（只查、不發）`, position: { left: Math.min(Math.round(innerWidth * 0.28), Math.max(18, innerWidth - 380)), top: 80 }, gm, positionKey: storage2.STORE.panelPosition, html: `
+      }, { validation = false } = {}) {
+        const gm = gmAdapter(), memory = /* @__PURE__ */ new Map(), repoGm = validation ? { get: async (k, d) => k === storage2.STORE.blacklist ? gm.get(k, d) : memory.has(k) ? structuredClone(memory.get(k)) : d, set: async (k, v) => {
+          if (k === storage2.STORE.blacklist) return gm.set(k, v);
+          memory.set(k, structuredClone(v));
+        } } : gm, ui2 = mountPanel({ attribute: "data-account-precheck", title: `帳號預檢 v${VERSION}（${validation ? "驗收專用，不寫結果" : "只查、不發"}）`, position: { left: Math.min(Math.round(innerWidth * 0.28), Math.max(18, innerWidth - 380)), top: 80 }, gm, positionKey: storage2.STORE.panelPosition, html: `
     <label>直播原始 CSV（一份）<input data-files type="file" accept=".csv"></label><p data-file-list class="mini">請選原始檔，不要選篩選後的檔。</p><p data-resume class="mini"></p>
     <details><summary>本腳本黑名單</summary><label>每行一個完整帳號<textarea data-blacklist></textarea></label><button data-save-blacklist>儲存黑名單</button><p class="mini">名單只存本腳本；修改後按儲存才生效。</p></details>
     <label>買家與狀態<select data-preview-select></select></label><p data-source class="mini"></p><div class="actions"><button data-mark-manual>這位人工確認找得到（留）</button><button data-mark-blocked>這位列入黑名單</button></div>
-    <label class="check"><input data-dry type="checkbox" checked><span>演練：前 3 位待查者，只顯示判斷、不寫結果。</span></label><button data-start class="primary">開始演練</button><button data-stop class="danger stop hidden">緊急停止</button>
+    <label class="check"><input data-dry type="checkbox" checked><span>演練：前 3 位待查者，只顯示判斷、不寫結果。</span></label>${validation ? '<label class="check"><input data-validation-all type="checkbox" checked><span>全名單演練（不寫結果）</span></label>' : ""}<button data-start class="primary">開始演練</button><button data-stop class="danger stop hidden">緊急停止</button>
     <p data-status class="status">正在準備紀錄…</p><p data-summary class="mini"></p><div class="actions"><button data-export-filtered>匯出預檢通過的直播檔</button><button data-export-pending>匯出待處理直播檔</button><button data-export-list>匯出名單與結果</button></div>
-    <button data-recheck>搜尋未確認的重新查一次</button><details><summary>整份重新查</summary><button data-new-round>這份檔重新全部查一次</button></details><p class="mini">完全不發訊息；只有搜尋結果沒有封鎖欄位的客人，才點進對話看封鎖（對話會變已讀）。預檢時不要發明細。待處理檔不能拿來叫貨；後續更新須重新匯出、另建場次。</p><pre data-log></pre>` });
+    <button data-recheck>搜尋未確認的重新查一次</button><details><summary>整份重新查</summary><button data-new-round>這份檔重新全部查一次</button></details><p class="mini">完全不發訊息；搜尋結果缺封鎖欄位時會點進對話確認；買家搜尋找不到時，會改看買家訊息並點進對話確認（會變已讀）；找到的帳號 UID 要和直播檔相同。預檢時不要發明細。待處理檔不能拿來叫貨；後續更新須重新匯出、另建場次。</p><pre data-log></pre>${validation ? "<details><summary>驗收完整紀錄（不能作為叫貨檔）</summary><pre data-validation-output></pre></details>" : ""}` });
         if (!ui2) return;
-        const $ = ui2.$, repo = storage2.createRepository(gm);
-        const state = { entry: null, queue: null, round: 0, records: {}, blacklist: [], busy: true, running: false, stop: false, booted: false };
+        const $ = ui2.$, repo = storage2.createRepository(repoGm);
+        const state = { entry: null, queue: null, round: 0, records: {}, blacklist: [], busy: true, running: false, stop: false, booted: false, validation, validationResults: [] };
         function controls() {
+          if (validation) {
+            $("[data-dry]").checked = true;
+          }
           const disabled = state.busy || state.running || !state.booted;
           for (const s of ["[data-files]", "[data-save-blacklist]", "[data-start]", "[data-dry]", "[data-blacklist]"]) $(s).disabled = disabled;
           for (const s of ["[data-export-filtered]", "[data-export-pending]", "[data-export-list]", "[data-new-round]", "[data-recheck]", "[data-preview-select]", "[data-mark-manual]", "[data-mark-blocked]"]) $(s).disabled = disabled || !state.entry;
@@ -1183,8 +1496,14 @@ function createEthanToolDock({id,label,name,version,order,colour,panel,collapse,
           $("[data-start]").disabled = disabled || !state.queue?.items.length;
           $("[data-stop]").classList.toggle("hidden", !state.running);
           $("[data-start]").textContent = $("[data-dry]").checked ? "開始演練" : "開始檢查";
+          if (validation) {
+            $("[data-dry]").disabled = true;
+            for (const selector of ["[data-export-filtered]", "[data-export-pending]", "[data-export-list]", "[data-new-round]", "[data-recheck]", "[data-mark-manual]", "[data-mark-blocked]"]) $(selector).disabled = true;
+            $("[data-validation-all]").disabled = disabled;
+            $("[data-start]").textContent = $("[data-validation-all]").checked ? "開始全名單演練" : "開始演練";
+          }
           const account = $("[data-preview-select]").value, item = state.queue?.items.find((i) => i.account === account);
-          if (item) $("[data-mark-manual]").disabled = disabled || ["blocked", "chatBlocked"].includes(core2.itemState(state.queue, state.records, item));
+          if (item) $("[data-mark-manual]").disabled = validation || disabled || ["blocked", "chatBlocked"].includes(core2.itemState(state.queue, state.records, item));
         }
         async function render() {
           if (state.queue) {
@@ -1204,6 +1523,17 @@ function createEthanToolDock({id,label,name,version,order,colour,panel,collapse,
             const item = state.queue.items.find((i) => i.account === $("[data-preview-select]").value);
             $("[data-source]").textContent = item ? `原檔 ${item.rowCount} 列；${core2.displayLabel(state.queue, state.records, item)}` : "";
             $("[data-recheck]").disabled = state.running || state.busy || !state.queue.items.some((i) => ["notFound", "searchUnconfirmed"].includes(core2.itemState(state.queue, state.records, i)));
+          }
+          if (validation && state.validationResults.length) {
+            const r = state.validationResults;
+            const byAccount = new Map(r.map((d) => [d.account, d]));
+            for (const option of $("[data-preview-select]").options) {
+              const d = byAccount.get(option.value);
+              if (d) option.textContent = `${d.account}：驗收${core2.LABELS[d.status]}（不寫結果）`;
+            }
+            const selected2 = byAccount.get($("[data-preview-select]").value), item = state.queue.items.find((i) => i.account === $("[data-preview-select]").value);
+            if (selected2) $("[data-source]").textContent = `原檔 ${item.rowCount} 列；驗收${core2.LABELS[selected2.status]}（不寫結果）`;
+            $("[data-summary]").textContent = `驗收已查 ${r.length} 位：找得到 ${r.filter((x) => x.status === "found").length}、聊聊已封鎖 ${r.filter((x) => x.status === "chatBlocked").length}、搜尋未確認 ${r.filter((x) => x.status === "searchUnconfirmed").length}、黑名單 ${r.filter((x) => x.status === "blocked").length}；結果僅在記憶體，不能作為叫貨檔。`;
           }
           controls();
         }
@@ -1261,6 +1591,7 @@ function createEthanToolDock({id,label,name,version,order,colour,panel,collapse,
           }
         });
         async function selected(manual) {
+          if (validation) return;
           if (state.running || state.busy || !state.queue) return;
           const item = state.queue.items.find((i) => i.account === $("[data-preview-select]").value);
           if (!item) return;
@@ -1287,6 +1618,7 @@ function createEthanToolDock({id,label,name,version,order,colour,panel,collapse,
         $("[data-mark-manual]").addEventListener("click", () => selected(true));
         $("[data-mark-blocked]").addEventListener("click", () => selected(false));
         for (const [selector, kind] of [["[data-export-filtered]", "passed"], ["[data-export-pending]", "pending"], ["[data-export-list]", "list"]]) $(selector).addEventListener("click", async () => {
+          if (validation) return;
           if (state.running || state.busy || !state.entry) return;
           try {
             await chat2.withLock(async () => {
@@ -1303,6 +1635,7 @@ function createEthanToolDock({id,label,name,version,order,colour,panel,collapse,
           }
         });
         async function reset(all) {
+          if (validation) return;
           if (state.running || state.busy || !state.entry) return;
           try {
             await chat2.withLock(async () => {
@@ -1319,55 +1652,58 @@ function createEthanToolDock({id,label,name,version,order,colour,panel,collapse,
         }
         $("[data-recheck]").addEventListener("click", () => reset(false));
         $("[data-new-round]").addEventListener("click", () => reset(true));
+        $("[data-validation-all]")?.addEventListener("change", controls);
         $("[data-start]").addEventListener("click", async () => {
           if (state.running || state.busy || !state.queue?.items.length) return;
           state.running = true;
           state.stop = false;
+          state.validationResults = [];
+          if (validation) $("[data-validation-output]").textContent = "";
           ui2.setBadge({ phase: "phase1", running: true, start: true, reset: true });
           controls();
           try {
             await chat2.withLock(async () => {
-              const { records } = await checkCurrent(), dry = $("[data-dry]").checked, all = core2.runnableItems(state.queue, records), items = dry ? all.slice(0, 3) : all;
+              const { records } = await checkCurrent(), dry = validation || $("[data-dry]").checked, full = validation && $("[data-validation-all]").checked;
+              const all = full ? state.queue.items : core2.runnableItems(state.queue, records), items = dry && !full ? all.slice(0, 3) : all;
               if (!items.length) {
                 ui2.setBadge({ phase: "phase1", outcome: dry ? "complete" : "waiting" });
                 ui2.show("沒有待查者；搜尋未確認需手動重查。");
                 if (!dry && !state.stop && !core2.summary(state.queue, records).unchecked) ((proof) => queueMicrotask(() => onFormalSuccess(proof).catch(ui2.fail)))({ batchId: state.queue.batchId, sourceHash: state.entry.hash });
                 return;
               }
-              const runtime = chat2.createChatRuntime({ stop: () => state.stop, onStatus: ui2.show, allowConversation: false }), checkBlocked = blockCheck.createBlockChecker({ stop: () => state.stop });
+              const identities = blockCheck.sourceIdentities(state.entry), runtime = chat2.createChatRuntime({ stop: () => state.stop, onStatus: ui2.show, allowConversation: false });
+              let currentIndex = 0;
+              const check = blockCheck.createPrecheckEngine({ runtime, stop: () => state.stop, onOpening: (account) => ui2.show(`${dry ? "演練" : "檢查"} ${currentIndex + 1}／${items.length}：${account}（點進對話看封鎖）`) });
               await runtime.ready(false);
               for (let index = 0; index < items.length; index++) {
+                currentIndex = index;
                 runtime.safe();
                 ui2.setBadge({ phase: "phase1", running: true, done: index + 1, total: items.length });
-                const current = await checkCurrent(), item = items[index];
-                if (!core2.RETRYABLE.includes(core2.itemState(state.queue, current.records, item))) continue;
+                const current = await checkCurrent(), item = items[index], source = identities.get(item.account);
+                const blacklisted = state.queue.blacklist.includes(item.account);
+                if (!full && !core2.RETRYABLE.includes(core2.itemState(state.queue, current.records, item))) continue;
                 ui2.show(`${dry ? "演練" : "檢查"} ${index + 1}／${items.length}：${item.account}`);
-                let result;
-                try {
-                  const q = await runtime.query(item.account, "user", "all");
-                  result = blockCheck.classifyForPrecheck(q.results, item.account);
-                } catch (error) {
-                  if (error.code !== "SEARCH_UNFINISHED") throw error;
-                  result = { status: "searchUnconfirmed", code: error.code, detail: "未完成搜尋：沒有看到本次重設與完成，請人工核對後手動重查。" };
-                }
-                if (result.status === "needsBlockCheck") {
-                  ui2.show(`${dry ? "演練" : "檢查"} ${index + 1}／${items.length}：${item.account}（點進對話看封鎖）`);
-                  try {
-                    const b = await checkBlocked(result.match);
-                    result = b.is_blocked ? { status: "chatBlocked", code: "CHAT_BLOCKED_AFTER_OPEN", detail: "搜尋結果沒有封鎖欄位；點進對話確認：聊聊已封鎖，整位排除。" } : { status: "found", code: "FOUND_AFTER_OPEN", detail: "搜尋結果沒有封鎖欄位；點進對話確認沒封鎖（對話會變已讀），沒有發送訊息。" };
-                  } catch (error) {
-                    if (error.code !== "BLOCK_CHECK_FAILED") throw error;
-                    result = { status: "searchUnconfirmed", code: "BLOCK_CHECK_FAILED", detail: `找得到帳號，但點進對話確認封鎖沒有成功（${error.message}），請人工核對。` };
-                  }
-                }
+                const result = blacklisted ? { status: "blocked", code: "BLACKLIST", detail: "本腳本黑名單排除", diagnostic: { account: item.account, route: "blacklist", sourceUid: source?.kind === "one" ? source.uid : null, sourceState: source?.kind, searchUid: null, openedUid: null, conversationId: null } } : await check(item.account, source);
                 if (!dry) await repo.write(state.queue, state.entry, item, result.status, result.code, result.detail);
-                ui2.log(`${item.account}：${result.status === "found" ? "找得到，留" : result.status === "chatBlocked" ? "聊聊已封鎖，排除" : "搜尋未確認"}${/_AFTER_OPEN$/u.test(result.code) ? "（點進對話確認）" : ""}${dry ? "（演練，不寫結果）" : ""}`);
+                ui2.log(blockCheck.resultLog(item.account, result, dry));
+                if (validation) {
+                  const d = { ...result.diagnostic, status: result.status, code: result.code, detail: result.detail };
+                  state.validationResults.push(d);
+                  const line = JSON.stringify({ ...d, openedUid: d.openedUid ?? (d.openAttempted ? "未確認" : "未開啟／不適用") });
+                  ui2.log("〔驗收紀錄〕" + line);
+                  $("[data-validation-output]").textContent += line + "\n";
+                }
                 await render();
                 if (index < items.length - 1) await runtime.delay(dry ? 500 : 2e3 + Math.floor(Math.random() * 2001));
               }
               await runtime.cleanup();
               ui2.setBadge({ phase: "phase1", outcome: dry ? "complete" : "waiting" });
+              if (validation) {
+                const r = state.validationResults;
+                $("[data-summary]").textContent = `驗收已查 ${r.length} 位：找得到 ${r.filter((x) => x.status === "found").length}、聊聊已封鎖 ${r.filter((x) => x.status === "chatBlocked").length}、搜尋未確認 ${r.filter((x) => x.status === "searchUnconfirmed").length}、黑名單 ${r.filter((x) => x.status === "blocked").length}；結果僅在記憶體，不能作為叫貨檔。`;
+              }
               ui2.show(dry ? "演練完成，沒有寫檢查結果；請核對後取消演練再正式查。" : "本次檢查完成，請核對摘要並匯出。");
+              if (validation) ui2.show("驗收演練完成；不寫結果、不查第二段，不提供作業檔匯出。");
               if (!dry && !state.stop) ((proof) => queueMicrotask(() => onFormalSuccess(proof).catch(ui2.fail)))({ batchId: state.queue.batchId, sourceHash: state.entry.hash });
             });
           } catch (error) {
@@ -1387,7 +1723,7 @@ function createEthanToolDock({id,label,name,version,order,colour,panel,collapse,
           ui2.dock.setNotice(last?.progressVersion === 2 && Number.isFinite(last.completed) && Number.isFinite(last.total) && last.completed < last.total);
           if (last) $("[data-resume]").textContent = last.progressVersion === 2 ? `上次 ${last.name} 已查 ${last.completed}／${last.total} 位。重新選同一份原檔會接著查。` : `上次原檔：${last.name}。這是舊版進度，重新匯入後由本版核對待查者。`;
           state.booted = true;
-          ui2.show("紀錄準備好了；本版只搜尋，不發訊息、不開對話。");
+          ui2.show("紀錄準備好了；只搜尋、不發訊息；需要時會點進對話確認封鎖。");
         } catch (error) {
           ui2.fail(error);
         } finally {
@@ -1802,7 +2138,7 @@ function createEthanToolDock({id,label,name,version,order,colour,panel,collapse,
         if (summary.unchecked) fail("PHASE1", "第一段仍有待查買家");
         const accepted = new Set(state.queue.items.filter((p) => ["found", "manualSent", "sent"].includes(core2.itemState(state.queue, saved.records, p))).map((p) => p.account));
         const source = identities(state.entry.text, accepted), records = state.queue.items.map((p) => [p.account, core2.itemState(state.queue, saved.records, p), saved.records[core2.recordKey(state.queue.batchId, p.account)] || null]);
-        return { ...source, shopId: pageShopId(), sourceHash: state.entry.hash, batchId: state.queue.batchId, sourceTool: "precheck", sourceVersion: "0.4.8", snapshotFingerprint: await digest(JSON.stringify([state.entry.hash, state.queue.batchId, records, source])) };
+        return { ...source, shopId: pageShopId(), sourceHash: state.entry.hash, batchId: state.queue.batchId, sourceTool: "precheck", sourceVersion: "0.4.9", snapshotFingerprint: await digest(JSON.stringify([state.entry.hash, state.queue.batchId, records, source])) };
       }
       async function replaySnapshot(state, core2) {
         if (state.running || state.stop || !state.result?.canExport) fail("PHASE1", "回放尚無正式可匯出結果");

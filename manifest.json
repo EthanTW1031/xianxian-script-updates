@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "publishedAt": "2026-11-01T06:57:02.250Z",
+  "publishedAt": "2026-11-01T07:39:12.186Z",
   "scripts": [
     {
       "id": "fb-inbox-finder",
@@ -56,11 +56,11 @@
       "id": "shopee-account-precheck",
       "name": "Shopee 帳號預檢",
       "namespace": "local.shopee.account-precheck",
-      "version": "0.4.8",
+      "version": "0.4.9",
       "file": "scripts/shopee-account-precheck.user.js",
-      "sha256": "7f349fc5e8b92a501f77761c4a29b4fe93855629ecb34ee4ff6663f02fb3e19e",
-      "bytes": 139967,
-      "updatedAt": "2026-10-26T12:36:00.926Z"
+      "sha256": "7563acc29ed8ded41b70cb55d2c76503bbe9796cba9a4f8359b0c312b3e490d7",
+      "bytes": 165817,
+      "updatedAt": "2026-11-01T07:39:12.186Z"
     },
     {
       "id": "shopee-auto-detail-reply",
