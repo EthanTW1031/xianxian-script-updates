@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopee 回放加單
 // @namespace    local.shopee.replay-add-order
-// @version      0.2.10
+// @version      0.2.11
 // @description  只讀聊聊回放加單，使用直播解析器，選 JAMBO 匯出檔讀商品清單，輸出獨立回放 CSV 與核對清單
 // @match        https://seller.shopee.tw/new-webchat/conversations*
 // @grant        GM_getValue
@@ -579,6 +579,21 @@ function createEthanToolDock({id,label,name,version,order,colour,panel,collapse,
         if (!decimal(r.id) || !safeUid(r.to_id) || typeof r.is_blocked !== "boolean") return { status: "searchUnconfirmed", code: "IDENTITY_INVALID", detail: "買家身分或封鎖旗標無法確認，請人工核對。" };
         return { status: r.is_blocked ? "chatBlocked" : "found", code: r.is_blocked ? "CHAT_BLOCKED" : "FOUND", detail: r.is_blocked ? "本次精確命中，但聊聊已封鎖，整位排除。" : "本次搜尋精確命中、沒封鎖；没有發送訊息。", conversation: r };
       }
+      function replayBuyerBinding(results, candidate) {
+        const fail = () => {
+          throw problem("BUYER_BINDING", "候選買家的帳號／對話／UID 無法核對，已停止。");
+        };
+        if (!decimal(candidate?.conversation_id) || !safeUid(candidate?.to_id) || typeof candidate?.to_name !== "string" || !candidate.to_name.trim() || !Array.isArray(results)) return fail();
+        const exact = results.filter((r2) => r2?.to_name === candidate.to_name);
+        if (exact.length !== 1) return fail();
+        const r = exact[0];
+        if (!safeUid(r.to_id) || r.to_id !== candidate.to_id) return fail();
+        const parts = typeof r.id === "string" ? /^([1-9][0-9]*)-([1-9][0-9]*)$/u.exec(r.id) : null;
+        const orderResult = !!parts && parts[1] === String(r.to_id);
+        if (r.id !== candidate.conversation_id && !orderResult) return fail();
+        if (typeof r.is_blocked !== "boolean" && !(orderResult && r.is_blocked == null)) return fail();
+        return r;
+      }
       var SCOPE_LABELS = { all: ["搜尋全部", "全部"], message: ["搜尋訊息", "訊息"] };
       var SCOPE_MENU_LABELS = ["搜尋全部", "搜尋買家", "搜尋訊息", "搜尋訂單"];
       function inScopeMenu(option) {
@@ -888,11 +903,10 @@ function createEthanToolDock({id,label,name,version,order,colour,panel,collapse,
         }
         async function openConversation(candidate) {
           if (!allowConversation) throw problem("FORBIDDEN", "帳號預檢不開對話。");
-          const q = await query(candidate.to_name, "user", "all"), r = classifyUser(q.results, candidate.to_name);
-          if (!r.conversation || r.conversation.id !== candidate.conversation_id || r.conversation.to_id !== candidate.to_id) throw problem("BUYER_BINDING", "候選買家的帳號／對話／UID 無法核對，已停止。");
-          if (r.status === "chatBlocked") return { conversation: r.conversation, messages: [], hasMoreOlder: false };
+          const q = await query(candidate.to_name, "user", "all"), r = replayBuyerBinding(q.results, candidate);
+          if (r.is_blocked === true) return { conversation: { id: candidate.conversation_id, to_name: r.to_name, to_id: r.to_id, is_blocked: true }, messages: [], hasMoreOlder: false };
           const input = inputElement(), root = columnRoot(input);
-          const nodes = [...root.querySelectorAll("div,li,span,p")].filter((e) => visible(e) && norm(e.textContent) === candidate.to_name && ownEntityInProps(e, (v) => v.id === candidate.conversation_id && v.to_name === candidate.to_name && v.to_id === candidate.to_id));
+          const nodes = [...root.querySelectorAll("div,li,span,p")].filter((e) => visible(e) && norm(e.textContent) === candidate.to_name && ownEntityInProps(e, (v) => v.id === r.id && v.to_name === candidate.to_name && v.to_id === candidate.to_id));
           nodes.sort((a, b) => {
             const x = a.getBoundingClientRect(), y = b.getBoundingClientRect();
             return x.width * x.height - y.width * y.height;
@@ -1001,7 +1015,7 @@ function createEthanToolDock({id,label,name,version,order,colour,panel,collapse,
         }
         return { ready, query, collectSearch, readConversation, cleanup, delay: (ms) => sleep(ms, stop), safe: () => safe(stop) };
       }
-      module.exports = { LOCK_NAME, LIMITS, PANELS, visible, safe, withLock, sleep, wait, inputElement, nativeSearchValue, activate, findStore, rootStatus, searchFrame, projectResults, classifyUser, ensureScope, validateSearchMessages, uniqueSearchMessages, conversationFrame, assertCandidateTitlesRead, createChatRuntime };
+      module.exports = { LOCK_NAME, LIMITS, PANELS, visible, safe, withLock, sleep, wait, inputElement, nativeSearchValue, activate, findStore, rootStatus, searchFrame, projectResults, classifyUser, replayBuyerBinding, ensureScope, validateSearchMessages, uniqueSearchMessages, conversationFrame, assertCandidateTitlesRead, createChatRuntime };
     }
   });
 
@@ -1182,7 +1196,7 @@ ${lines.join("\n")}`;
           place(r.left, r.top);
         });
         const replay = attribute === "data-replay-add-order";
-        const dock = createEthanToolDock({ id: replay ? "replay" : "precheck", label: replay ? "回放" : "預檢", name: replay ? "回放加單" : "帳號預檢", version: replay ? "0.2.10" : "0.4.7", order: replay ? 20 : 10, colour, panel, collapse: $("[data-collapse]") });
+        const dock = createEthanToolDock({ id: replay ? "replay" : "precheck", label: replay ? "回放" : "預檢", name: replay ? "回放加單" : "帳號預檢", version: replay ? "0.2.11" : "0.4.7", order: replay ? 20 : 10, colour, panel, collapse: $("[data-collapse]") });
         const show = (message, error = false) => {
           dock.status(error, "phase1");
           const target = $("[data-status]");
@@ -1234,7 +1248,7 @@ ${lines.join("\n")}`;
       var chat2 = require_chat_runtime();
       var { problem, safeMessage } = require_util();
       var { mountPanel, gmAdapter } = require_panel();
-      var VERSION = "0.2.10";
+      var VERSION = "0.2.11";
       var STORE = Object.freeze({ config: "replay:config:v1", panelPosition: "replay:panel-position:v1" });
       async function initReplay(core2, jambo2, onFormalSuccess = async () => {
       }) {
@@ -2077,7 +2091,7 @@ ${config.codes.length} 個商品（${config.codes[0]}～${config.codes.at(-1)}�
       async function replaySnapshot(state, core2) {
         if (state.running || state.stop || !state.result?.canExport) fail("PHASE1", "回放尚無正式可匯出結果");
         const csv = core2.ordersCsv(state.result), source = identities(csv);
-        return { ...source, shopId: pageShopId(), sourceHash: await digest(csv), batchId: state.config.sessionId, sourceTool: "replay", sourceVersion: "0.2.10", snapshotFingerprint: await digest(JSON.stringify([source, csv])) };
+        return { ...source, shopId: pageShopId(), sourceHash: await digest(csv), batchId: state.config.sessionId, sourceTool: "replay", sourceVersion: "0.2.11", snapshotFingerprint: await digest(JSON.stringify([source, csv])) };
       }
       function mountPhase({ ui: ui2, getSnapshot, gm, automatic }) {
         const box = document.createElement("section");

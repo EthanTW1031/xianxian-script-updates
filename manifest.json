@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "publishedAt": "2026-11-01T04:34:45.080Z",
+  "publishedAt": "2026-11-01T06:57:02.250Z",
   "scripts": [
     {
       "id": "fb-inbox-finder",
@@ -86,11 +86,11 @@
       "id": "shopee-replay-add-order",
       "name": "Shopee 回放加單",
       "namespace": "local.shopee.replay-add-order",
-      "version": "0.2.10",
+      "version": "0.2.11",
       "file": "scripts/shopee-replay-add-order.user.js",
-      "sha256": "2de8a16f64510bd0063d5d0b86c9159f3e15f70b6473e9d6aea9d76aad716d7c",
-      "bytes": 1163980,
-      "updatedAt": "2026-10-26T12:36:00.926Z"
+      "sha256": "742fad9300326ea29454953442efb471a209eb4e80e5a34b2231fe7d09ee56aa",
+      "bytes": 1164830,
+      "updatedAt": "2026-11-01T06:57:02.250Z"
     },
     {
       "id": "shopee-settlement-notice",
